@@ -85,6 +85,21 @@ export function median(values) {
   return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
 }
 
+/**
+ * Largest value that is held for more than one frame: the max after a 3-frame median.
+ * A single-frame glitch in the pose can't set it.
+ */
+export function robustMax(arr) {
+  const v = arr.filter(Number.isFinite);
+  if (v.length < 3) return v.length ? Math.min(...v) : NaN;
+  let m = -Infinity;
+  for (let i = 1; i < v.length - 1; i++) {
+    const a = v[i - 1], b = v[i], c = v[i + 1];
+    m = Math.max(m, Math.max(Math.min(a, b), Math.min(Math.max(a, b), c)));
+  }
+  return m;
+}
+
 export const maxOf = (arr) => { const v = arr.filter(Number.isFinite); return v.length ? Math.max(...v) : NaN; };
 export const minOf = (arr) => { const v = arr.filter(Number.isFinite); return v.length ? Math.min(...v) : NaN; };
 

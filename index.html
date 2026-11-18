@@ -11,7 +11,7 @@
   <header class="bar">
     <div>
       <h1>Rehab tracker</h1>
-      <p class="sub">Knee exercises · joint tracking</p>
+      <p class="sub">Knee exercises · v1.1</p>
     </div>
     <span id="modelStatus" class="chip">Loading pose model…</span>
   </header>
@@ -44,6 +44,7 @@
         <span id="reps" class="best"></span>
         <span id="cue" class="cue" hidden></span>
       </div>
+      <div id="count" class="count" hidden><span id="countNum">5</span><span class="countmsg">Get into the starting position and hold still</span></div>
       <div id="recBadge" class="rec" hidden>● REC <span id="recTime">0 s</span></div>
       <div id="progress" class="progress" hidden><div id="progressBar"></div></div>
     </section>
@@ -66,11 +67,16 @@
             <option value="full">Full (more accurate)</option></select></label>
         <label>Samples per second
           <input id="rate" type="number" min="5" max="30" step="1" value="15"></label>
+        <label>Countdown before recording (s, 0 = none)
+          <input id="countdown" type="number" min="0" max="30" step="1" value="5"></label>
+        <label>Stop by itself after (reps, blank = manual)
+          <input id="stopReps" type="number" min="1" max="50" step="1" placeholder="manual"></label>
         <label id="targetWrap">Target knee bend (°, from your PT)
           <input id="target" type="number" min="30" max="150" step="1" placeholder="optional"></label>
       </div>
       <p class="note">Thresholds for the error checks are prototype defaults chosen by the team, not clinical standards.
-        Angles come from a 2D camera image and can be off by several degrees.</p>
+        Angles come from a 2D camera image and can be off by several degrees.
+        <a href="v1/">Open the previous version (1.0)</a>.</p>
     </details>
 
     <section id="results" class="card" hidden>

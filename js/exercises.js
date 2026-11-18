@@ -7,7 +7,7 @@
 // are fractions of a body segment so they do not depend on how far the camera is.
 import {
   vis, mid, dist, angle, flexion, leanFromUp, tiltFromHorizontal, distToSegment,
-  heightAboveLine, median, maxOf,
+  heightAboveLine, median, robustMax,
 } from "./geometry.js";
 import { topRows } from "./engine.js";
 
@@ -54,8 +54,8 @@ function hipLine(f, s) {
   const a = angle(sh, h, k);
   return heightAboveLine(h, sh, k) > 0 ? 360 - a : a;
 }
-const deltaMax = (rows, key, base, sign = 1) => maxOf(rows.map((r) => sign * (r[key] - base[key])));
-const absDeltaMax = (rows, key, base) => maxOf(rows.map((r) => Math.abs(r[key] - base[key])));
+const deltaMax = (rows, key, base, sign = 1) => robustMax(rows.map((r) => sign * (r[key] - base[key])));
+const absDeltaMax = (rows, key, base) => robustMax(rows.map((r) => Math.abs(r[key] - base[key])));
 const fmt = (v, d = 0) => (Number.isFinite(v) ? v.toFixed(d) : "--");
 
 // ---------- exercises ----------
@@ -132,7 +132,7 @@ export const EXERCISES = {
         signal: { key: "knee", dir: 1, start: 8, end: 4, minExcursion: 10, label: "Knee bend", unit: "°" },
         measure: (rep, { facing }) => ({
           knee_bend: rep.peak,
-          hip_forward: maxOf(rep.rows.map((r) => (r.hipX - rep.base.hipX) * facing)) / rep.base.thigh,
+          hip_forward: robustMax(rep.rows.map((r) => (r.hipX - rep.base.hipX) * facing)) / rep.base.thigh,
         }),
         summaryKeys: ["knee_bend", "hip_forward"],
         checks: [
@@ -156,7 +156,7 @@ export const EXERCISES = {
         signal: { key: "knee", dir: 1, start: 20, end: 10, minExcursion: 30, label: "Knee bend", unit: "°" },
         measure: (rep, ctx) => {
           const top = topRows(rep, EXERCISES.standing_knee_bend.views.side.signal, 0.5);
-          return { knee_bend: rep.peak, thigh_forward: maxOf(top.map((r) => r.thigh)), trunk_lean: absDeltaMax(rep.rows, "trunk", rep.base) };
+          return { knee_bend: rep.peak, thigh_forward: robustMax(top.map((r) => r.thigh)), trunk_lean: absDeltaMax(rep.rows, "trunk", rep.base) };
         },
         summaryKeys: ["knee_bend", "thigh_forward", "trunk_lean"],
         checks: [
@@ -208,7 +208,7 @@ export const EXERCISES = {
         measure: (rep) => {
           const rise = rep.rows.slice(0, rep.peakIndex + 1);
           const near = rise.filter((r) => r.wristThigh < T.sit_to_stand.handsDist).length;
-          return { knee_at_stand: rep.peak, trunk_lean_max: maxOf(rep.rows.map((r) => r.trunk)),
+          return { knee_at_stand: rep.peak, trunk_lean_max: robustMax(rep.rows.map((r) => r.trunk)),
                    hands_on_thighs: rise.length ? near / rise.length : 0 };
         },
         summaryKeys: ["knee_at_stand", "trunk_lean_max", "rise_s"],
@@ -226,9 +226,9 @@ export const EXERCISES = {
           const hw = hipWidth(f);
           const am = mid(f.ankle.left, f.ankle.right), hm = hipMid(f);
           const towardGood = Math.sign(f.ankle[good][0] - f.ankle[op][0]) || 1;
-          return { ok, hipUp: -hm[1] / hw, shift: (hm[0] - am[0]) * towardGood / hw };
+          return { ok, hipUp: -hm[1], hw, shift: (hm[0] - am[0]) * towardGood / hw };
         },
-        signal: { key: "hipUp", dir: 1, start: 0.5, end: 0.25, minExcursion: 0.8, label: "Hip height", unit: "hip widths" },
+        signal: { key: "hipUp", scale: "hw", dir: 1, start: 0.5, end: 0.25, minExcursion: 0.8, label: "Hip height", unit: "hip widths" },
         measure: (rep) => ({ weight_shift: deltaMax(rep.rows, "shift", rep.base) }),
         summaryKeys: ["weight_shift"],
         checks: [
@@ -262,12 +262,12 @@ export const EXERCISES = {
         setup: "Stand facing the phone holding a chair, feet hip-width apart, phone 2–3 m away at hip height. Bend both knees a little, then straighten.",
         metrics: (f) => {
           const ok = legOk(f, "left") && legOk(f, "right");
-          return { ok, hipDown: hipMid(f)[1] / hipWidth(f), valgusL: valgus(f, "left"), valgusR: valgus(f, "right") };
+          return { ok, hipDown: hipMid(f)[1], hw: hipWidth(f), valgusL: valgus(f, "left"), valgusR: valgus(f, "right") };
         },
-        signal: { key: "hipDown", dir: 1, start: 0.06, end: 0.03, minExcursion: 0.09, label: "Hip drop", unit: "hip widths" },
+        signal: { key: "hipDown", scale: "hw", dir: 1, start: 0.06, end: 0.03, minExcursion: 0.09, label: "Hip drop", unit: "hip widths" },
         measure: (rep) => {
           const top = topRows(rep, EXERCISES.mini_squat.views.front.signal, 0.5);
-          return { valgus_left: maxOf(top.map((r) => r.valgusL)), valgus_right: maxOf(top.map((r) => r.valgusR)) };
+          return { valgus_left: robustMax(top.map((r) => r.valgusL)), valgus_right: robustMax(top.map((r) => r.valgusR)) };
         },
         summaryKeys: ["valgus_left", "valgus_right"],
         checks: [
@@ -288,12 +288,12 @@ export const EXERCISES = {
         metrics: (f, { op }) => {
           const ok = legOk(f, op);
           const w = ["left", "right"].filter((s) => vis(f.wrist[s])).map((s) => f.wrist[s][1] < f.hip[s][1] ? 1 : 0);
-          return { ok, hipUp: -f.hip[op][1] / thighLen(f, op), knee: ok ? kneeFlex(f, op) : NaN, handHigh: w.length ? Math.max(...w) : 0 };
+          return { ok, hipUp: -f.hip[op][1], thigh: thighLen(f, op), knee: ok ? kneeFlex(f, op) : NaN, handHigh: w.length ? Math.max(...w) : 0 };
         },
-        signal: { key: "hipUp", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "thigh lengths" },
+        signal: { key: "hipUp", scale: "thigh", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "thigh lengths" },
         measure: (rep) => {
           const firstHalf = rep.rows.slice(0, Math.max(1, Math.ceil(rep.peakIndex / 2)));
-          return { knee_at_start: maxOf(firstHalf.map((r) => r.knee)), knee_at_top: rep.rows[rep.peakIndex].knee,
+          return { knee_at_start: robustMax(firstHalf.map((r) => r.knee)), knee_at_top: median(rep.rows.slice(Math.max(0, rep.peakIndex - 1), rep.peakIndex + 2).map((r) => r.knee)),
                    hand_on_rail: median(rep.rows.map((r) => r.handHigh)) >= 0.5 };
         },
         summaryKeys: ["knee_at_start", "knee_at_top", "hand_on_rail"],
@@ -306,10 +306,10 @@ export const EXERCISES = {
           const hw = hipWidth(f);
           // + when the hip on the non-stepping side is lower than the stepping side (hip drop).
           const drop = (Math.atan2(f.hip[good][1] - f.hip[op][1], hw) * 180) / Math.PI;
-          return { ok, hipUp: -hipMid(f)[1] / hw, drop, valgus: valgus(f, op) };
+          return { ok, hipUp: -hipMid(f)[1], hw, drop, valgus: valgus(f, op) };
         },
-        signal: { key: "hipUp", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "hip widths" },
-        measure: (rep) => ({ hip_drop: maxOf(rep.rows.map((r) => r.drop)), valgus: maxOf(rep.rows.map((r) => r.valgus)) }),
+        signal: { key: "hipUp", scale: "hw", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "hip widths" },
+        measure: (rep) => ({ hip_drop: robustMax(rep.rows.map((r) => r.drop)), valgus: robustMax(rep.rows.map((r) => r.valgus)) }),
         summaryKeys: ["hip_drop", "valgus"],
         checks: [
           { id: "hip_drops", label: (r) => `Hip drops on the other side (${fmt(r.hip_drop)}°)`, test: (r) => r.hip_drop > T.step_up.hipDrop },
@@ -343,10 +343,10 @@ export const EXERCISES = {
         setup: "Lie on your back with knees bent, phone at your feet looking toward you. Lift the hips, keeping them level.",
         metrics: (f) => {
           const ok = vis(f.hip.left, f.hip.right);
-          return { ok, hipUp: -hipMid(f)[1] / hipWidth(f), tilt: Math.abs(tiltFromHorizontal(f.hip.left, f.hip.right)) };
+          return { ok, hipUp: -hipMid(f)[1], hw: hipWidth(f), tilt: Math.abs(tiltFromHorizontal(f.hip.left, f.hip.right)) };
         },
-        signal: { key: "hipUp", dir: 1, start: 0.15, end: 0.08, minExcursion: 0.25, label: "Hip lift", unit: "hip widths" },
-        measure: (rep) => ({ pelvis_tilt: maxOf(rep.rows.map((r) => r.tilt)) }),
+        signal: { key: "hipUp", scale: "hw", dir: 1, start: 0.15, end: 0.08, minExcursion: 0.25, label: "Hip lift", unit: "hip widths" },
+        measure: (rep) => ({ pelvis_tilt: robustMax(rep.rows.map((r) => r.tilt)) }),
         summaryKeys: ["pelvis_tilt"],
         checks: [
           { id: "pelvis_tilts", label: (r) => `Pelvis tilts (${fmt(r.pelvis_tilt)}°)`, test: (r) => r.pelvis_tilt > T.bridge.pelvisTilt },

@@ -7,6 +7,7 @@ const add = (p, v, s = 1) => [p[0] + v[0] * s, p[1] + v[1] * s];
 const sub = (p, v, s = 1) => [p[0] - v[0] * s, p[1] - v[1] * s];
 
 let seed = 7;
+export const setSeed = (v) => { seed = v; };
 const noise = () => { seed = (seed * 16807) % 2147483647; return (seed / 2147483647 - 0.5) * 3; };
 
 /** 0 -> 1 -> 0 movement profile with rest, rise, hold, fall (seconds). */
@@ -27,9 +28,20 @@ const IDX = {
   heel: { left: 29, right: 30 }, toe: { left: 31, right: 32 },
 };
 
-function emit(pts, W, H, visOf) {
+// nz (all optional): { jitter: +/- px added to every joint, spikeEvery: about one frame in this
+// many has one joint thrown far off for that frame, spikePx, visFlicker: joints' visibility
+// wobbles around the 0.5 threshold }
+function emit(pts, W, H, visOf, nz = {}) {
   const lm = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 0.1 }));
-  const put = (i, p, v) => { lm[i] = { x: (p[0] + noise()) / W, y: (p[1] + noise()) / H, z: 0, visibility: v }; };
+  const amp = nz.jitter ? nz.jitter / 1.5 : 1;
+  const u = () => noise() / 3 + 0.5;                       // 0..1
+  const spikeAt = nz.spikeEvery && u() < 1 / nz.spikeEvery ? [11, 12, 23, 24, 25, 26, 27, 28][Math.floor(u() * 8) % 8] : -1;
+  const put = (i, p, v) => {
+    let x = p[0] + noise() * amp, y = p[1] + noise() * amp;
+    if (i === spikeAt) { const a = u() * 2 * Math.PI; x += Math.cos(a) * nz.spikePx; y += Math.sin(a) * nz.spikePx; }
+    if (nz.visFlicker && v > 0.5 && i !== 0) v = 0.53 + (u() - 0.5) * 0.2;
+    lm[i] = { x: x / W, y: y / H, z: 0, visibility: v };
+  };
   put(0, pts.nose, 0.95);
   for (const name of Object.keys(IDX)) for (const s of ["left", "right"]) {
     if (pts[name]?.[s]) put(IDX[name][s], pts[name][s], visOf(s, name));
@@ -261,7 +273,8 @@ export function synth(ex, view, t, o = {}) {
     body = { pts }; visOf = visAll;
     truth = { lift };
   } else throw new Error(`no synthetic pose for ${ex}/${view}`);
-  return { lm: emit(body.pts, W, H, visOf), W, H, truth, p };
+  const nz = o.noise ? { jitter: (o.noise.jitter ?? 0) * L, spikeEvery: o.noise.spikeEvery, spikePx: (o.noise.spike ?? 0.08) * L, visFlicker: o.noise.visFlicker } : {};
+  return { lm: emit(body.pts, W, H, visOf, nz), W, H, truth, p };
 }
 
 // Rotate landmarks into the frame the model sees when the app turns the image

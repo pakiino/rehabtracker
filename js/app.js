@@ -4,6 +4,7 @@ import { FilesetResolver, PoseLandmarker } from
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs";
 import { toFrame, facingOf, vis, rotationForHead, unrotateLandmarks, drawRotated, VIS_OK } from "./geometry.js";
 import { analyze, liveCue } from "./engine.js";
+import { PoseSmoother, Debounced } from "./smooth.js";
 import { EXERCISES, ORDER, T } from "./exercises.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
@@ -11,7 +12,7 @@ const MODEL_URLS = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
 };
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.0";
 const ROTATION_CYCLE = [90, -90, 0];
 const LIVE_WINDOW_S = 40;
 
@@ -21,6 +22,7 @@ const ui = {
   status: $("modelStatus"), value: $("value"), hint: $("hint"), reps: $("reps"), cue: $("cue"),
   sigLabel: $("sigLabel"), stage: $("stage"), exercise: $("exercise"), view: $("view"), op: $("op"),
   btnCamera: $("btnCamera"), btnRecord: $("btnRecord"), file: $("fileInput"),
+  count: $("count"), countNum: $("countNum"), countdown: $("countdown"), stopReps: $("stopReps"),
   rec: $("recBadge"), recTime: $("recTime"), progress: $("progress"), bar: $("progressBar"),
   facingCam: $("facingCam"), model: $("model"), rate: $("rate"), target: $("target"),
 };
@@ -29,8 +31,12 @@ const state = {
   landmarker: null, modelKind: null, delegate: null, lastTs: 0,
   stream: null, looping: false, lastVideoTime: -1, wakeLock: null,
   recording: false, t0: 0, lastRecT: -Infinity, rec: null, live: [], frameNo: 0,
-  rotation: 0, rotationSet: false, noPoseStreak: 0, rotCanvas: null,
+  rotation: 0, rotCanvas: null,
   liveResult: null, result: null, session: null, lastFileName: null,
+  smoother: new PoseSmoother(), cueLatch: new Debounced({ onS: 0.4, offS: 0.6, minShowS: 1.5 }),
+  warnLatch: new Debounced({ onS: 0.6, offS: 0.3, minShowS: 0.8 }),
+  noPoseSince: null, poseRun: 0, headVotes: 0, lyingRun: 0, flipRun: 0, uprightRun: 0,
+  countdownTimer: null, audio: null, valueAt: -Infinity,
 };
 window.__tracker = state; // for browser tests (no personal data)
 
@@ -112,12 +118,18 @@ function renderExercise() {
   $("targetWrap").hidden = e.id !== "heel_slide";
   ui.sigLabel.textContent = signalLabel(v.signal);
   ui.value.textContent = "--"; ui.reps.textContent = ""; showCue(null);
-  state.live = []; state.liveResult = null; state.rotation = 0; state.rotationSet = false; state.facing = null;
+  state.live = []; state.liveResult = null; resetTracking();
   try { localStorage.setItem("rehabtracker", JSON.stringify({ ex: e.id, view: ui.view.value, op: ui.op.value })); } catch { /* optional */ }
 }
 const signalLabel = (sig) => sig.unit === "°"
   ? `${sig.label}${sig.key === "line" ? " (180° = straight line)" : sig.key === "knee" && sig.dir < 0 ? " (0° = straight)" : ""}`
   : `${sig.label} (change from start, ${sig.unit})`;
+
+function resetTracking() {
+  state.rotation = 0; state.smoother.reset(); state.cueLatch.reset(); state.warnLatch.reset();
+  Object.assign(state, { facing: null, facingVotes: 0, noPoseSince: null, poseRun: 0, headVotes: 0, lyingRun: 0,
+    flipRun: 0, uprightRun: 0, valueAt: -Infinity });
+}
 
 // ---------- camera ----------
 async function startCamera() {
@@ -133,13 +145,14 @@ async function startCamera() {
   sizeCanvas();
   ui.stage.classList.toggle("mirror", ui.facingCam.value === "user");
   ui.btnCamera.textContent = "Stop camera"; ui.btnRecord.disabled = false;
-  state.live = []; state.t0 = performance.now(); state.rotationSet = false; state.rotation = 0;
+  state.live = []; state.t0 = performance.now(); resetTracking();
   try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch { /* optional */ }
   state.looping = true;
   requestAnimationFrame(loop);
 }
 function stopCamera() {
-  if (state.recording) toggleRecord();
+  if (state.countdownTimer) cancelCountdown();
+  if (state.recording) stopRecording();
   state.looping = false;
   state.stream?.getTracks().forEach((t) => t.stop());
   state.stream = null; video.srcObject = null;
@@ -163,9 +176,15 @@ function loop() {
 }
 
 // Lying exercises: rotate the frame 90° so the model sees the person upright, then map back.
+function setRotation(r) {
+  if (state.rotation === r) return;
+  state.rotation = r;
+  state.smoother.reset();
+  Object.assign(state, { headVotes: 0, lyingRun: 0, flipRun: 0, uprightRun: 0 });
+}
 function detect(ts) {
-  const W = video.videoWidth, H = video.videoHeight, lying = vw().lying;
-  if (!lying) state.rotation = 0;
+  const W = video.videoWidth, H = video.videoHeight, lying = vw().lying, now = ts / 1000;
+  if (!lying) setRotation(0);
   let source = video;
   if (state.rotation) {
     state.rotCanvas ??= document.createElement("canvas");
@@ -175,23 +194,40 @@ function detect(ts) {
     source = rc;
   }
   const lm = state.landmarker.detectForVideo(source, ts).landmarks?.[0];
-  if (lm) {
-    state.noPoseStreak = 0;
-    const out = unrotateLandmarks(lm, state.rotation);
-    if (lying && !state.rotationSet) {
-      // First detection: turn so the head is up. Head left of the hips in the image -> rotate 90°.
-      const hipX = (out[23].x + out[24].x) / 2;
-      state.rotation = rotationForHead(out[0].x < hipX);
-      state.rotationSet = true;
+  if (!lm) {
+    // No person: for a lying exercise try another rotation, but only after a real gap.
+    // A rotation that has been working for a while gets more patience.
+    state.noPoseSince ??= now;
+    if (lying && now - state.noPoseSince > (state.poseRun >= 30 ? 2.5 : 0.8)) {
+      setRotation(ROTATION_CYCLE[(ROTATION_CYCLE.indexOf(state.rotation) + 1) % ROTATION_CYCLE.length]);
+      state.noPoseSince = now; state.poseRun = 0;
     }
-    if (state.rec) state.rec.rotations[state.rotation] = (state.rec.rotations[state.rotation] || 0) + 1;
-    return out;
+    return undefined;
   }
-  if (lying && ++state.noPoseStreak >= 15) {
-    state.noPoseStreak = 0;
-    state.rotation = ROTATION_CYCLE[(ROTATION_CYCLE.indexOf(state.rotation) + 1) % ROTATION_CYCLE.length];
+  state.noPoseSince = null; state.poseRun++;
+  const rot = state.rotation, out = unrotateLandmarks(lm, rot);
+  if (state.rec) state.rec.rotations[rot] = (state.rec.rotations[rot] || 0) + 1;
+  if (lying) {
+    // Body direction as the model saw it (its image is H x W when rotated): head relative to hips.
+    const sw = rot ? H : W, sh = rot ? W : H;
+    const dx = (lm[0].x - (lm[23].x + lm[24].x) / 2) * sw, dy = (lm[0].y - (lm[23].y + lm[24].y) / 2) * sh;
+    const sideways = Math.abs(dx) > Math.abs(dy);
+    if (rot === 0) {
+      // Rotate only once the person has been lying for several frames in a row;
+      // the side the head is on (majority vote) decides which way.
+      state.lyingRun = sideways ? state.lyingRun + 1 : 0;
+      state.headVotes = sideways ? state.headVotes + Math.sign(dx) : 0;
+      if (state.lyingRun >= 5) setRotation(rotationForHead(state.headVotes < 0));
+    } else {
+      // Rotated: the head should now be above the hips. Upside down -> turn the other way.
+      // Sideways -> the person got up, go back to no rotation.
+      state.flipRun = !sideways && dy > 0 ? state.flipRun + 1 : 0;
+      state.uprightRun = sideways ? state.uprightRun + 1 : 0;
+      if (state.flipRun >= 8) setRotation(-rot);
+      else if (state.uprightRun >= 15) setRotation(0);
+    }
   }
-  return undefined;
+  return out;
 }
 
 // ---------- per frame ----------
@@ -199,13 +235,14 @@ function onPose(lm, t, live) {
   const W = canvas.width, H = canvas.height;
   g.clearRect(0, 0, W, H);
   if (!lm) {
-    ui.value.textContent = "--";
-    setHint(vw().lying ? "No person found. Phone on the floor in landscape, whole body in the picture."
-      : "No person found. Fit the whole body in the picture.", true);
+    const warn = state.warnLatch.update(vw().lying ? "No person found. Phone on the floor in landscape, whole body in the picture."
+      : "No person found. Fit the whole body in the picture.", t);
+    if (warn) { setHint(warn, true); ui.value.textContent = "--"; showCue(null); }
     if (state.rec && (state.recording || !live)) state.rec.noPose++;
     return;
   }
-  const f = toFrame(lm, W, H, t);
+  // Steady the joints before anything is measured (smooth.js).
+  const f = toFrame(state.smoother.update(lm, t, W, H), W, H, t);
   drawBody(f);
   const v = vw(), sig = v.signal;
   if (ui.view.value === "side") {
@@ -217,13 +254,24 @@ function onPose(lm, t, live) {
   const m = v.metrics(f, ctx);
   state.live.push(f);
   while (state.live.length && state.live[0].t < t - LIVE_WINDOW_S && !state.recording) state.live.shift();
-  if (!m.ok) setHint(`Can't see all the points this exercise needs: ${ex().tracks.toLowerCase()}. Keep the whole body in the picture.`, true);
-  else setHint(`${ui.op.value === "left" ? "Left" : "Right"} leg${state.recording ? " · recording" : ""}`, false);
+  // Warnings and the big number are debounced so they don't flash on a single bad frame.
+  let problem = null;
+  if (!m.ok) {
+    const o = ctx.good, Leg = (x) => (x === "left" ? "left" : "right");
+    const otherClear = ui.view.value === "side" && vis(f.hip[o], f.knee[o], f.ankle[o]) && !vis(f.hip[ctx.op], f.knee[ctx.op], f.ankle[ctx.op]);
+    problem = otherClear
+      ? `Can't see the ${Leg(ctx.op)} leg clearly, but the ${Leg(o)} leg is clear. Turn so the operated leg is nearest the phone, or change Operated leg.`
+      : `Can't see all the points this exercise needs: ${ex().tracks.toLowerCase()}. Keep the whole body in the picture.`;
+  }
+  const warn = state.warnLatch.update(problem, t);
+  if (warn) setHint(warn, true);
+  else setHint(`${ui.op.value === "left" ? "Left" : "Right"} leg${state.recording ? " · recording" : state.countdownTimer ? " · get ready" : ""}`, false);
 
-  if (m.ok) {
+  if (m.ok && t - state.valueAt >= 0.12) {
+    state.valueAt = t;
     if (sig.unit === "°") ui.value.textContent = `${Math.round(m[sig.key])}°`;
-    else if (state.liveResult?.base?.[sig.key] != null) ui.value.textContent = (sig.dir * (m[sig.key] - state.liveResult.base[sig.key])).toFixed(2);
-  } else ui.value.textContent = "--";
+    else if (state.liveResult?.base?.signal != null) ui.value.textContent = (sig.dir * (m[sig.key] / state.liveResult.scale - state.liveResult.base.signal)).toFixed(2);
+  } else if (!m.ok && warn) ui.value.textContent = "--";
 
   // Rep counting and cues on the live buffer, a few times a second.
   if (++state.frameNo % 5 === 0) {
@@ -232,10 +280,20 @@ function onPose(lm, t, live) {
       const r = analyze(src, ex(), ctxNow(), opts());
       state.liveResult = r;
       const last = r.reps[r.reps.length - 1];
-      ui.reps.textContent = `Reps: ${r.reps.length}` + (last ? ` · last: ${last.errors.length ? last.errors.map((e) => e.label).join("; ") : "no errors"}` : "");
+      ui.reps.textContent = `${state.recording ? "Reps" : "Practice reps (not recording)"}: ${r.reps.length}` + (last ? ` · last: ${last.errors.length ? last.errors.map((e) => e.label).join("; ") : "no errors"}` : "");
     }
   }
-  showCue(m.ok && state.liveResult ? liveCue(ex(), ctx, f, state.liveResult.base) : null);
+  showCue(state.cueLatch.update(m.ok && state.liveResult ? liveCue(ex(), ctx, f, state.liveResult.base) : null, t));
+
+  // Optional: stop by itself once the chosen number of reps is done (1 s after the last one).
+  if (live && state.recording && state.liveResult) {
+    const want = Number(ui.stopReps.value), reps = state.liveResult.reps;
+    if (want > 0 && reps.length >= want && !state.liveResult.unfinished && t - reps[reps.length - 1].t_end >= 1.0) {
+      beep(660, 0.12); setTimeout(() => beep(660, 0.12), 200);
+      toggleRecord();
+      return;
+    }
+  }
 
   const record = live ? state.recording : true;
   if (!record) return;
@@ -277,17 +335,50 @@ function clampRate() { return Math.min(30, Math.max(5, Number(ui.rate.value) || 
 // ---------- recording ----------
 const newRec = (mode) => ({ frames: [], noPose: 0, width: canvas.width, height: canvas.height, mode, rotations: {} });
 function toggleRecord() {
-  if (!state.recording) {
-    state.rec = newRec("camera"); state.lastRecT = -Infinity; state.lastFileName = null;
-    state.recording = true;
-    ui.btnRecord.textContent = "Stop & review"; ui.btnRecord.classList.add("recording");
-    ui.rec.hidden = false; ui.recTime.textContent = "0 s"; $("results").hidden = true;
-  } else {
-    state.recording = false;
-    ui.btnRecord.textContent = "Record"; ui.btnRecord.classList.remove("recording");
-    ui.rec.hidden = true;
-    finalize();
-  }
+  if (state.countdownTimer) return cancelCountdown();
+  if (state.recording) return stopRecording();
+  try { state.audio ??= new (window.AudioContext || window.webkitAudioContext)(); state.audio.resume?.(); } catch { /* sound is optional */ }
+  const n = Math.min(30, Math.max(0, Number(ui.countdown.value) || 0));
+  $("results").hidden = true;
+  if (n > 0) startCountdown(n); else beginRecording();
+}
+// Countdown: time to get into the starting position, so the recording begins from rest
+// and doesn't include walking away from the phone.
+function startCountdown(n) {
+  const end = performance.now() + n * 1000;
+  let last = null;
+  ui.count.hidden = false; ui.btnRecord.textContent = "Cancel";
+  const tick = () => {
+    const left = Math.ceil((end - performance.now()) / 1000);
+    if (left <= 0) { cancelCountdown(); beep(880, 0.35); beginRecording(); return; }
+    if (left !== last) { last = left; ui.countNum.textContent = left; if (left <= 3) beep(440, 0.08); }
+  };
+  tick();
+  state.countdownTimer = setInterval(tick, 100);
+}
+function cancelCountdown() {
+  clearInterval(state.countdownTimer); state.countdownTimer = null;
+  ui.count.hidden = true; ui.btnRecord.textContent = "Record";
+}
+function beginRecording() {
+  state.rec = newRec("camera"); state.lastRecT = -Infinity; state.lastFileName = null;
+  state.recording = true; state.liveResult = null; state.cueLatch.reset();
+  ui.btnRecord.textContent = "Stop & review"; ui.btnRecord.classList.add("recording");
+  ui.rec.hidden = false; ui.recTime.textContent = "0 s"; ui.reps.textContent = "Reps: 0";
+}
+function stopRecording() {
+  state.recording = false;
+  ui.btnRecord.textContent = "Record"; ui.btnRecord.classList.remove("recording");
+  ui.rec.hidden = true;
+  finalize();
+}
+function beep(freq, dur) {
+  try {
+    const a = state.audio; if (!a) return;
+    const o = a.createOscillator(), gn = a.createGain();
+    o.frequency.value = freq; gn.gain.value = 0.15;
+    o.connect(gn).connect(a.destination); o.start(); o.stop(a.currentTime + dur);
+  } catch { /* sound is optional */ }
 }
 
 async function analyzeFile(file) {
@@ -298,7 +389,7 @@ async function analyzeFile(file) {
   await once(video, "loadedmetadata");
   await video.play().catch(() => {}); video.pause();
   sizeCanvas();
-  state.rec = newRec("video_file"); state.live = []; state.rotationSet = false; state.rotation = 0; state.facingVotes = 0;
+  state.rec = newRec("video_file"); state.live = []; resetTracking();
   const step = 1 / clampRate(), dur = video.duration;
   if (!Number.isFinite(dur) || dur <= 0) { setHint("Could not read this video's length.", true); return; }
   ui.progress.hidden = false; ui.btnCamera.disabled = true;
@@ -356,6 +447,7 @@ function finalize() {
     source: {
       app: "rehabtracker", app_version: APP_VERSION, pose_model: `mediapipe pose_landmarker_${state.modelKind}`,
       delegate: state.delegate, capture: rec.mode, file_name: state.lastFileName, sample_rate_hz: clampRate(),
+      smoothing: "median-3 + One Euro filter on joints; visibility averaged with hysteresis (js/smooth.js)",
       frames_without_pose: rec.noPose, frames_used: r.valid.length, detection_rotation_deg: rotUsed != null ? Number(rotUsed) : 0,
       recorded_at: new Date().toISOString(),
     },
@@ -511,6 +603,12 @@ ui.exercise.onchange = () => { fillViews(ui.view.value); renderExercise(); $("re
 ui.view.onchange = () => { renderExercise(); $("results").hidden = true; };
 ui.op.onchange = () => { renderExercise(); if (!$("results").hidden && state.rec) finalize(); };
 ui.target.onchange = () => { if (!$("results").hidden && state.rec) finalize(); };
+const saveSettings = () => { try { localStorage.setItem("rehabtracker.settings", JSON.stringify({ countdown: ui.countdown.value, stopReps: ui.stopReps.value })); } catch { /* optional */ } };
+ui.countdown.onchange = saveSettings; ui.stopReps.onchange = saveSettings;
+try {
+  const st = JSON.parse(localStorage.getItem("rehabtracker.settings") || "null");
+  if (st) { ui.countdown.value = st.countdown ?? 5; ui.stopReps.value = st.stopReps ?? ""; }
+} catch { /* optional */ }
 ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
 ui.file.onchange = (e) => analyzeFile(e.target.files[0]).finally(() => { e.target.value = ""; });

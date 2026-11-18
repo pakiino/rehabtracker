@@ -8,6 +8,9 @@ calls for, and flags the common errors from the exercise spec.
 **Open it on a phone:** https://shanexf1.github.io/rehabtracker/ (after GitHub Pages is
 turned on: Settings → Pages → Deploy from a branch → `main`, `/ (root)`).
 
+**Version 1.1** (current) is steadier than 1.0: see [What changed in 1.1](#what-changed-in-11).
+Version 1.0 is kept at https://shanexf1.github.io/rehabtracker/v1/ in case you want to compare.
+
 Nothing is uploaded. The video is processed on the phone and only leaves it if you share
 the JSON export.
 
@@ -16,7 +19,9 @@ the JSON export.
 1. Pick the **exercise**, the **camera view** (side or front, where the exercise has both)
    and the **operated leg**.
 2. Set the phone up as the text under the menus says, then **Start camera**.
-3. Hold the starting position for a second, press **Record**, do a few reps, press **Stop & review**.
+3. Press **Record**. A 5-second countdown gives you time to get into the starting position;
+   recording starts on the long beep. Do a few reps, then press **Stop & review**
+   (or set "Stop by itself after N reps" in Settings so you don't have to get up).
 4. The result shows the rep count, each common error with how many reps had it, the
    measured numbers per rep and a chart. **Share JSON** sends the session to a PT or an agent.
 
@@ -50,6 +55,36 @@ hold at the top doesn't count.
 **Not measurable from video:** pulling with the rail on the step-up. A camera can't see
 force, so the app only reports whether a hand is up on the rail.
 
+## What changed in 1.1
+
+Version 1.0 measured every frame as it came from the pose model, so a shaky joint could
+miscount a rep or raise a false error. 1.1 adds:
+
+- **Joint smoothing** (`js/smooth.js`): a 3-frame median removes one-frame jumps, then a
+  One Euro filter removes jitter while the joint is still without lagging real movement
+  (under 0.1 s).
+- **Steady visibility:** a joint near the "can I see it" threshold no longer flickers in
+  and out, so frames stop being dropped at random.
+- **Errors need more than one frame:** per-rep maximums (hip lift, trunk lean, knee
+  inward drift and so on) ignore a value that appears in a single frame.
+- **Steadier rep counting:** a longer median on the rep signal, a rep starts and ends only
+  when two frames agree, and position signals are scaled by one body length per recording
+  rather than a noisy per-frame one.
+- **Countdown and optional auto-stop**, so the recording doesn't include walking to and
+  from the phone.
+- **Calmer screen:** cues must persist 0.4 s before showing and stay up at least 1.5 s;
+  "can't see" warnings wait 0.6 s; the big number updates about 8 times a second.
+- **Lying exercises:** the picture is turned only after the person has been lying for
+  several frames, corrects itself if it turned the wrong way, and no longer hunts for a
+  new rotation the moment one frame is missed.
+- **Wrong leg hint:** if the other leg is the one clearly in view, the app says so.
+
+On 624 simulated recordings with a shaky pose model (every joint jittering by ±0.5% of
+body length, one frame in 25 with a joint thrown far off, visibility wobbling around the
+threshold), 1.0 miscounted reps in 73 recordings, wrongly flagged 97 reps and missed the
+real error in 31 reps. 1.1 got all 624 right. These are simulated poses, not people: real
+video will be harder.
+
 ## What to trust
 
 - **The thresholds are prototype defaults picked by the team, not clinical standards.**
@@ -64,10 +99,12 @@ force, so the app only reports whether a hand is up on the rail.
 
 ```
 js/geometry.js   angles, distances, picture rotation for lying exercises
+js/smooth.js     joint smoothing and debouncing of on-screen text
 js/engine.js     per-frame metrics -> reps -> per-rep measures -> error checks
 js/exercises.js  the 10 exercises as configuration: points, rep signal, measures, checks, thresholds
 js/app.js        camera, MediaPipe, live readout and cues, results, JSON export
 tests/           synthetic body generator and tests
+v1/              version 1.0, frozen
 ```
 
 Each exercise names one **rep signal** (for example knee bend, or hip height). A rep starts
@@ -83,11 +120,12 @@ Adding an exercise means adding one entry to `js/exercises.js`.
 npm test
 ```
 
-85 tests. `tests/synthBody.mjs` draws a stick figure doing each exercise, either cleanly or
+96 tests. `tests/synthBody.mjs` draws a stick figure doing each exercise, either cleanly or
 with one error injected. For every exercise, view and leg, the tests check that a clean
 recording gives the right rep count with no errors, and that each injected error is flagged
 on every rep. They also cover slow reps, 15 fps with dropped frames, the wrong leg being
-selected, and a recording that starts mid-movement.
+selected, and a recording that starts mid-movement. `tests/steady.test.mjs` repeats every
+case with a shaky pose model and checks the smoother and the cue debouncing on their own.
 
 The app itself was also run in headless Chrome with a stand-in pose model for all 10 exercises.
 

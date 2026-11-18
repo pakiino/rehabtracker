@@ -3,7 +3,14 @@
 // signal, per-rep measures and checks. Pure functions only.
 import { median, maxOf } from "./geometry.js";
 
-const smooth3 = (vals) => vals.map((v, i) => median(vals.slice(Math.max(0, i - 1), i + 2)));
+// Median filter on the rep signal: 5 samples at 12 frames/s or faster, otherwise 3.
+// Removes glitches of one or two frames without rounding off a real turning point much.
+function smoothSignal(rows, key) {
+  const vals = rows.map((r) => r[key]);
+  const dts = rows.slice(1).map((r, i) => r.t - rows[i].t);
+  const w = dts.length && median(dts) <= 0.085 ? 2 : 1;
+  return vals.map((v, i) => median(vals.slice(Math.max(0, i - w), i + w + 1)));
+}
 
 /** Median of each numeric metric over a list of metric rows. */
 export function baseOf(rows) {
@@ -28,8 +35,11 @@ export function analyze(frames, ex, ctx, opts = {}) {
   const sig = v.signal;
   const rows = frames.map((f) => ({ t: f.t, ...v.metrics(f, ctx) }));
   const valid = rows.filter((r) => r.ok && Number.isFinite(r[sig.key]));
-  const s = smooth3(valid.map((r) => r[sig.key]));
-  valid.forEach((r, i) => { r.signal = s[i]; });
+  // Position signals are measured in pixels and divided by one body length for the whole
+  // recording (median hip width or thigh length), not a per-frame one, which would add its jitter.
+  const scale = sig.scale ? median(valid.map((r) => r[sig.scale])) || 1 : 1;
+  const s = smoothSignal(valid, sig.key);
+  valid.forEach((r, i) => { r.signal = s[i] / scale; });
 
   const restS = opts.restS ?? 1.0;
   const reps = [];
@@ -49,17 +59,20 @@ export function analyze(frames, ex, ctx, opts = {}) {
   }
   let cur = null, sinceRest = [];
   const endThr = sig.end ?? sig.start / 2;
-  for (const r of valid) {
+  for (let i = 0; i < valid.length; i++) {
+    const r = valid[i];
     const d = sig.dir * (r.signal - base.signal);
+    // A rep starts or ends only when two frames in a row agree.
+    const dNext = i + 1 < valid.length ? sig.dir * (valid[i + 1].signal - base.signal) : d;
     if (!cur) {
-      if (d >= sig.start) { cur = { rows: [r], base: { ...base }, pre: sinceRest.slice(-45) }; }
+      if (d >= sig.start && dNext >= sig.start) { cur = { rows: [r], base: { ...base }, pre: sinceRest.slice(-45) }; }
       else {
         sinceRest.push(r);
         if (sinceRest.length > 50) sinceRest.shift();
       }
     } else {
       cur.rows.push(r);
-      if (d <= endThr) {
+      if (d <= endThr && dNext <= endThr) {
         finishRep(cur, sig, v, ctx, reps);
         cur = null;
         sinceRest = [];
@@ -82,7 +95,7 @@ export function analyze(frames, ex, ctx, opts = {}) {
       if (c.session && c.test(rep, { best, reps, ctx, opts })) rep.errors.push({ id: c.id, label: c.label(rep) });
     }
   }
-  return { rows, valid, reps, unfinished, base, summary: summarize(reps, v), signal: sig };
+  return { rows, valid, reps, unfinished, base, scale, summary: summarize(reps, v), signal: sig };
 }
 
 function finishRep(cur, sig, v, ctx, reps) {

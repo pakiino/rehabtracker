@@ -1,8 +1,8 @@
 {
   "name": "rehabtracker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Phone-browser joint tracking for 10 knee rehab exercises: rep counting and common-error checks with MediaPipe Pose.",
-  "scripts": { "test": "node --test tests/exercises.test.mjs" }
+  "scripts": { "test": "node --test tests/exercises.test.mjs tests/steady.test.mjs" }
 }

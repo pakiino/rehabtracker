@@ -138,3 +138,10 @@ label.field select { min-height: 46px; font-size: 1rem; font-weight: 600; }
 .legend .swatch.reperr { background: rgba(201,133,0,.5); margin-left: 10px; }
 .tablewrap { overflow-x: auto; }
 td.bad { color: #ffd27a; }
+
+/* v1.1: countdown before recording */
+.count { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; background: rgba(18,18,17,.55); color: #fff; text-align: center; padding: 16px; z-index: 3; }
+.count #countNum { font-size: 6rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.count .countmsg { font-size: 1.05rem; font-weight: 600; }
+.note a { color: inherit; }

@@ -1,6 +1,7 @@
 import { synth, period } from "./synthBody.mjs";
 import { toFrame, facingOf } from "../js/geometry.js";
 import { analyze } from "../js/engine.js";
+import { PoseSmoother } from "../js/smooth.js";
 import { EXERCISES, ORDER } from "../js/exercises.js";
 export const CASES = {
   heel_slide: { side: [null, "hip_lifts", "partial", ["too_fast", { rise: 0.8 }]] },
@@ -14,11 +15,13 @@ export const CASES = {
   glute_bridge: { side: [null, "arches", "partial"], front: [null, "pelvis_tilts"] },
   side_lying_abduction: { front: [null, "hip_rolls", "too_high"] },
 };
-export function run(ex, view, err, prof = {}, op = "right", nReps = 3) {
+// x (optional): { noise: {jitter, spikeEvery, visFlicker}, smooth: run the joints through PoseSmoother as the app does, fps }
+export function run(ex, view, err, prof = {}, op = "right", nReps = 3, x = {}) {
   const P = period(prof), dur = nReps * P + 1.0, frames = [];
-  for (let t = 0; t < dur; t += 1 / 30) {
-    const { lm, W, H } = synth(ex, view, t, { op, err, prof });
-    frames.push(toFrame(lm, W, H, t));
+  const sm = x.smooth ? new PoseSmoother() : null;
+  for (let t = 0; t < dur; t += 1 / (x.fps ?? 30)) {
+    const { lm, W, H } = synth(ex, view, t, { op, err, prof, noise: x.noise });
+    frames.push(toFrame(sm ? sm.update(lm, t, W, H) : lm, W, H, t));
   }
   const good = op === "left" ? "right" : "left";
   const facing = view === "side" ? facingOf(frames[0], op) : 1;
