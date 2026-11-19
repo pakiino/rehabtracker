@@ -71,6 +71,7 @@
           <input id="countdown" type="number" min="0" max="30" step="1" value="5"></label>
         <label>Stop by itself after (reps, blank = manual)
           <input id="stopReps" type="number" min="1" max="50" step="1" placeholder="manual"></label>
+        <label class="check"><input id="saveVideo" type="checkbox" checked> Also save the video while recording</label>
         <label id="targetWrap">Target knee bend (°, from your PT)
           <input id="target" type="number" min="30" max="150" step="1" placeholder="optional"></label>
       </div>
@@ -105,6 +106,8 @@
       <div class="controls">
         <button id="btnShare" class="primary">Share JSON</button>
         <button id="btnDownload">Download JSON</button>
+        <button id="btnShareVideo" hidden>Share video</button>
+        <button id="btnDownloadVideo" hidden>Download video</button>
       </div>
     </section>
   </main>

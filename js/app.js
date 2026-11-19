@@ -22,7 +22,7 @@ const ui = {
   status: $("modelStatus"), value: $("value"), hint: $("hint"), reps: $("reps"), cue: $("cue"),
   sigLabel: $("sigLabel"), stage: $("stage"), exercise: $("exercise"), view: $("view"), op: $("op"),
   btnCamera: $("btnCamera"), btnRecord: $("btnRecord"), file: $("fileInput"),
-  count: $("count"), countNum: $("countNum"), countdown: $("countdown"), stopReps: $("stopReps"),
+  count: $("count"), countNum: $("countNum"), countdown: $("countdown"), stopReps: $("stopReps"), saveVideo: $("saveVideo"),
   rec: $("recBadge"), recTime: $("recTime"), progress: $("progress"), bar: $("progressBar"),
   facingCam: $("facingCam"), model: $("model"), rate: $("rate"), target: $("target"),
 };
@@ -360,14 +360,70 @@ function cancelCountdown() {
   clearInterval(state.countdownTimer); state.countdownTimer = null;
   ui.count.hidden = true; ui.btnRecord.textContent = "Record";
 }
+// ---------- video saving (camera recordings) ----------
+// The camera stream is recorded as-is (not mirrored, no overlay), so the saved video lines up
+// with the tracked points: time in the video = frame.t - video.t_offset_s in the JSON.
+function pickVideoType() {
+  for (const t of ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"]) {
+    if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
+  }
+  return "";
+}
+function startVideo() {
+  state.video = null;
+  if (!ui.saveVideo.checked || !state.stream || !window.MediaRecorder) return;
+  try {
+    const mimeType = pickVideoType();
+    const mr = new MediaRecorder(state.stream, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 5_000_000 });
+    const chunks = [];
+    mr.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const v = { mr, chunks, blob: null, mime: mr.mimeType || mimeType || "video/webm",
+      t_offset_s: (performance.now() - state.t0) / 1000, done: null };
+    v.done = new Promise((res) => { mr.onstop = () => { v.blob = new Blob(chunks, { type: v.mime }); res(); }; });
+    mr.start(1000);
+    state.video = v;
+  } catch (e) { console.warn("Video saving not available:", e); state.video = null; }
+}
+function stopVideo() {
+  const v = state.video;
+  if (!v || v.mr.state === "inactive") return;
+  v.mr.stop();
+  v.done.then(() => {
+    const ok = !!v.blob?.size;
+    $("btnShareVideo").hidden = !ok; $("btnDownloadVideo").hidden = !ok;
+    if (ok && state.session) state.session.video = videoInfo();
+  });
+}
+const baseName = () => {
+  const pid = $("pid").value.trim() || "P-anon";
+  return `${state.session.exercise}_${pid}_${state.rec?.stamp ?? new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
+};
+const videoExt = () => (state.video?.mime.includes("mp4") ? "mp4" : "webm");
+const videoInfo = () => (state.video?.blob ? { file_name: `${baseName()}.${videoExt()}`, mime: state.video.mime,
+  t_offset_s: Math.round(state.video.t_offset_s * 1000) / 1000, note: "time in the video = frame.t - t_offset_s" } : null);
+const videoFile = () => new File([state.video.blob], `${baseName()}.${videoExt()}`, { type: state.video.mime });
+async function shareVideo() {
+  if (!state.video?.blob || !state.session) return;
+  const file = videoFile();
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: "Exercise video" }); return; }
+    catch (e) { if (e.name === "AbortError") return; }
+  }
+  download(file);
+}
+
 function beginRecording() {
   state.rec = newRec("camera"); state.lastRecT = -Infinity; state.lastFileName = null;
+  state.rec.stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+  $("btnShareVideo").hidden = true; $("btnDownloadVideo").hidden = true;
+  startVideo();
   state.recording = true; state.liveResult = null; state.cueLatch.reset();
   ui.btnRecord.textContent = "Stop & review"; ui.btnRecord.classList.add("recording");
   ui.rec.hidden = false; ui.recTime.textContent = "0 s"; ui.reps.textContent = "Reps: 0";
 }
 function stopRecording() {
   state.recording = false;
+  stopVideo();
   ui.btnRecord.textContent = "Record"; ui.btnRecord.classList.remove("recording");
   ui.rec.hidden = true;
   finalize();
@@ -384,6 +440,7 @@ function beep(freq, dur) {
 async function analyzeFile(file) {
   if (!file || !state.landmarker) return;
   stopCamera();
+  state.video = null; $("btnShareVideo").hidden = true; $("btnDownloadVideo").hidden = true;
   ui.stage.classList.remove("mirror");
   video.src = URL.createObjectURL(file);
   await once(video, "loadedmetadata");
@@ -451,6 +508,7 @@ function finalize() {
       frames_without_pose: rec.noPose, frames_used: r.valid.length, detection_rotation_deg: rotUsed != null ? Number(rotUsed) : 0,
       recorded_at: new Date().toISOString(),
     },
+    video: rec.mode === "camera" ? videoInfo() : null,
   };
   renderResults(r, e, v, rec);
   $("results").hidden = false;
@@ -571,8 +629,8 @@ function sessionFile() {
   s.patient_id = $("pid").value.trim() || "P-anon";
   const pain = $("pain").value.trim();
   if (pain !== "") s.pain_0_10 = Number(pain);
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
-  return new File([JSON.stringify(s, null, 1)], `${s.exercise}_${s.patient_id}_${stamp}.json`, { type: "application/json" });
+  if (s.video) s.video.file_name = `${baseName()}.${videoExt()}`;
+  return new File([JSON.stringify(s, null, 1)], `${baseName()}.json`, { type: "application/json" });
 }
 async function share() {
   if (!state.session) return;
@@ -603,11 +661,11 @@ ui.exercise.onchange = () => { fillViews(ui.view.value); renderExercise(); $("re
 ui.view.onchange = () => { renderExercise(); $("results").hidden = true; };
 ui.op.onchange = () => { renderExercise(); if (!$("results").hidden && state.rec) finalize(); };
 ui.target.onchange = () => { if (!$("results").hidden && state.rec) finalize(); };
-const saveSettings = () => { try { localStorage.setItem("rehabtracker.settings", JSON.stringify({ countdown: ui.countdown.value, stopReps: ui.stopReps.value })); } catch { /* optional */ } };
-ui.countdown.onchange = saveSettings; ui.stopReps.onchange = saveSettings;
+const saveSettings = () => { try { localStorage.setItem("rehabtracker.settings", JSON.stringify({ countdown: ui.countdown.value, stopReps: ui.stopReps.value, saveVideo: ui.saveVideo.checked })); } catch { /* optional */ } };
+ui.countdown.onchange = saveSettings; ui.stopReps.onchange = saveSettings; ui.saveVideo.onchange = saveSettings;
 try {
   const st = JSON.parse(localStorage.getItem("rehabtracker.settings") || "null");
-  if (st) { ui.countdown.value = st.countdown ?? 5; ui.stopReps.value = st.stopReps ?? ""; }
+  if (st) { ui.countdown.value = st.countdown ?? 5; ui.stopReps.value = st.stopReps ?? ""; ui.saveVideo.checked = st.saveVideo ?? true; }
 } catch { /* optional */ }
 ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
@@ -616,6 +674,8 @@ ui.model.onchange = () => loadModel(ui.model.value);
 ui.facingCam.onchange = () => { if (state.stream) { stopCamera(); startCamera(); } };
 $("btnShare").onclick = () => share();
 $("btnDownload").onclick = () => state.session && download();
+$("btnShareVideo").onclick = () => shareVideo();
+$("btnDownloadVideo").onclick = () => state.video?.blob && state.session && download(videoFile());
 window.addEventListener("resize", () => state.result && drawChart(state.result));
 document.addEventListener("visibilitychange", async () => {
   if (document.visibilityState === "visible" && state.stream && !state.wakeLock) {
