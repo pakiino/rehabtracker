@@ -147,6 +147,7 @@ async function startCamera() {
     } else { setHint("Camera blocked. Allow camera access for this site and try again.", true); console.error(e); return; }
   }
   video.muted = true; // never play the microphone back through the speaker
+  video.onpause = () => { if (state.stream && video.srcObject === state.stream) video.play().catch(() => {}); };
   video.removeAttribute("src");
   video.srcObject = state.stream;
   await video.play();
@@ -386,15 +387,25 @@ function startVideo() {
   if (!ui.saveVideo.checked || !state.stream || !window.MediaRecorder) return;
   try {
     const mimeType = pickVideoType();
-    const mr = new MediaRecorder(state.stream, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 5_000_000 });
+    // Record a clone of the stream: on iPhone/iPad, recording the same stream the preview
+    // uses can freeze the preview, which also stops the tracking.
+    const recStream = state.stream.clone();
+    const mr = new MediaRecorder(recStream, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 4_000_000 });
     const chunks = [];
     mr.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
     const v = { mr, chunks, blob: null, mime: mr.mimeType || mimeType || "video/webm",
       t_offset_s: (performance.now() - state.t0) / 1000, done: null };
-    v.done = new Promise((res) => { mr.onstop = () => { v.blob = new Blob(chunks, { type: v.mime }); res(); }; });
+    v.done = new Promise((res) => {
+      mr.onstop = () => { v.blob = new Blob(chunks, { type: v.mime }); recStream.getTracks().forEach((t) => t.stop()); res(); };
+    });
+    mr.onerror = (e) => { v.error = e.error?.message || "recording error"; console.error("Video recorder:", e.error || e); };
     mr.start(1000);
+    if (video.paused) video.play().catch(() => {});
     state.video = v;
-  } catch (e) { console.warn("Video saving not available:", e); state.video = null; }
+  } catch (e) {
+    console.warn("Video saving not available:", e); state.video = null;
+    setHint(`This browser can't save video (${e.message || e.name}). Tracking still works; record with the Camera app instead.`, true);
+  }
 }
 function stopVideo() {
   const v = state.video;
@@ -403,6 +414,7 @@ function stopVideo() {
   v.done.then(() => {
     const ok = !!v.blob?.size;
     $("btnShareVideo").hidden = !ok; $("btnDownloadVideo").hidden = !ok;
+    if (!ok) setHint(`The video couldn't be saved on this device${v.error ? ` (${v.error})` : ""}. The tracking data is still saved.`, true);
     if (ok && state.session) state.session.video = videoInfo();
   });
 }
