@@ -8,7 +8,8 @@ calls for, and flags the common errors from the exercise spec.
 **Open it on a phone:** https://shanexf1.github.io/rehabtracker/ (after GitHub Pages is
 turned on: Settings → Pages → Deploy from a branch → `main`, `/ (root)`).
 
-**Version 1.1** (current) is steadier than 1.0: see [What changed in 1.1](#what-changed-in-11).
+**Version 1.2** (current) tracks one leg in side views and warns about a wrong camera view:
+see [What changed in 1.2](#what-changed-in-12) and [1.1](#what-changed-in-11).
 Version 1.0 is kept at https://shanexf1.github.io/rehabtracker/v1/ in case you want to compare.
 
 Nothing is uploaded. The video is processed on the phone and only leaves it if you share
@@ -17,7 +18,8 @@ the JSON export.
 ## How to use it
 
 1. Pick the **exercise**, the **camera view** (side or front, where the exercise has both)
-   and the **operated leg**.
+   and the **operated leg**. In a side view the app tracks the one leg that moves, so keep
+   that leg nearest the phone; keep head to feet in the picture.
 2. Set the phone up as the text under the menus says, then **Start camera**.
 3. Press **Record**. A 5-second countdown gives you time to get into the starting position;
    recording starts on the long beep. Do a few reps, then press **Stop & review**
@@ -54,6 +56,32 @@ hold at the top doesn't count.
 
 **Not measurable from video:** pulling with the rail on the step-up. A camera can't see
 force, so the app only reports whether a hand is up on the rail.
+
+## What changed in 1.2
+
+From two real recordings (a standing knee bend and a seated knee extension) and one results
+screen that was plainly wrong:
+
+- **Side views track one leg, and only one side of the body.** Hip, knee and ankle of one
+  leg, plus the shoulder on the same side for the trunk checks. The other leg and the arms
+  are no longer measured or drawn.
+- **The leg is the one that moves.** In a side view the pose model often can't tell left
+  from right, and the menu is easy to set wrong, so the tracked leg is chosen from the
+  movement itself. The Operated leg menu still matters for front views.
+- **The leg no longer needs the shoulders.** If the head or shoulders are out of the
+  picture the knee is still measured and the trunk checks are skipped. The results say so,
+  because the pose model finds the body from the face and places joints less well without it.
+- **Wrong camera view is caught.** A side-on body analysed as a front view produced the
+  screen full of "hip drops 44 degrees / knee caves in 55 degrees". The app now compares
+  shoulder width with trunk length, warns live, marks such results as not reliable, and
+  re-analyzes the same recording when you correct the exercise or view in the menus.
+- **Knee inward drift and hip drop (front views) are measured against the standing leg
+  length and hip width**, and on the step-up only while the body is up on the stepping leg.
+  The plain hip-knee-ankle angle blows up when a bent knee points at the camera.
+- **A movement far bigger than the reps** (getting up, walking to the phone) is left out
+  instead of being reported as a rep, and no longer flattens the chart.
+- **Model: Auto** uses the more accurate Full model and drops to Lite only if the device
+  can't keep up with the live camera. Heavy can be chosen by hand for saved videos.
 
 ## What changed in 1.1
 
@@ -120,7 +148,7 @@ Adding an exercise means adding one entry to `js/exercises.js`.
 npm test
 ```
 
-96 tests. `tests/synthBody.mjs` draws a stick figure doing each exercise, either cleanly or
+100 tests. `tests/synthBody.mjs` draws a stick figure doing each exercise, either cleanly or
 with one error injected. For every exercise, view and leg, the tests check that a clean
 recording gives the right rep count with no errors, and that each injected error is flagged
 on every rep. They also cover slow reps, 15 fps with dropped frames, the wrong leg being

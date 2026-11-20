@@ -104,12 +104,20 @@ export const maxOf = (arr) => { const v = arr.filter(Number.isFinite); return v.
 export const minOf = (arr) => { const v = arr.filter(Number.isFinite); return v.length ? Math.min(...v) : NaN; };
 
 /** Facing direction in a side view: +1 if the person faces +x (toes ahead of heels), else -1. */
-export function facingOf(f, side) {
-  const toe = f.toe[side], heel = f.heel[side];
-  if (vis(toe, heel) && Math.abs(toe[0] - heel[0]) > 2) return Math.sign(toe[0] - heel[0]);
-  const sh = mid(f.shoulder.left, f.shoulder.right);
-  if (vis(f.nose, sh) && Math.abs(f.nose[0] - sh[0]) > 2) return Math.sign(f.nose[0] - sh[0]);
-  return 1;
+/**
+ * Which way the person faces in a side view: +1 = image right, -1 = image left.
+ * A vote of every clue that is visible: the nose is ahead of the shoulders (counts double),
+ * and each foot's toes are ahead of its heel. Doesn't depend on which leg is tracked.
+ */
+export function facingOf(f) {
+  let votes = 0;
+  const sh = vis(f.shoulder.left) ? (vis(f.shoulder.right) ? mid(f.shoulder.left, f.shoulder.right) : f.shoulder.left) : f.shoulder.right;
+  if (vis(f.nose, sh) && Math.abs(f.nose[0] - sh[0]) > 2) votes += 2 * Math.sign(f.nose[0] - sh[0]);
+  for (const s of ["left", "right"]) {
+    const toe = f.toe[s], heel = f.heel[s];
+    if (vis(toe, heel) && Math.abs(toe[0] - heel[0]) > 2) votes += Math.sign(toe[0] - heel[0]);
+  }
+  return votes >= 0 ? 1 : -1;
 }
 
 // ---------- lying down: rotate the image so the pose model sees the person upright ----------

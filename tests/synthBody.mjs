@@ -102,7 +102,7 @@ function frontBody({ cx, floorY, L, op, thighPitch, shankPitch, valgus = {}, hip
     const k = [midX + towardMid * Math.tan(rad(valgus[s] ?? 0)) * Ls * 0.5, kY];
     pts.hip[s] = h; pts.knee[s] = k; pts.ankle[s] = a;
     pts.heel[s] = [a[0], a[1] + 0.02 * L]; pts.toe[s] = [a[0], a[1] + 0.04 * L];
-    pts.shoulder[s] = [h[0] + trunkLean, h[1] - Lb];
+    pts.shoulder[s] = [h[0] + trunkLean - towardMid * 0.03 * L, h[1] - Lb];   // shoulders wider than hips
     pts.elbow[s] = [pts.shoulder[s][0] - towardMid * 0.05 * L, pts.shoulder[s][1] + 0.16 * L];
     pts.wrist[s] = [pts.elbow[s][0], pts.elbow[s][1] + 0.15 * L];
   }

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { CASES, run } from "./run_all.mjs";
 import { synth, period, rotateLandmarks } from "./synthBody.mjs";
 import { toFrame, facingOf, unrotateLandmarks } from "../js/geometry.js";
-import { analyze } from "../js/engine.js";
+import { analyze, chooseLeg, viewCheck } from "../js/engine.js";
 import { EXERCISES, ORDER } from "../js/exercises.js";
 
 const TRUTH_PEAK = {   // true value of the rep signal at the top of a clean rep
@@ -67,15 +67,70 @@ test("15 fps and dropped frames still give the same reps", () => {
   for (const rep of r.reps) assert.deepEqual(rep.errors, []);
 });
 
-test("wrong leg selected: the operated leg is hidden, so frames are rejected rather than mis-measured", () => {
-  const frames = [];
-  for (let t = 0; t < 2 * period() + 1; t += 1 / 30) {
-    const { lm, W, H } = synth("heel_slide", "side", t, { op: "right", visOp: 0.95, visGood: 0.3 });
-    frames.push(toFrame(lm, W, H, t));
+test("wrong leg selected, or the model mixes up left and right: the leg that moves is tracked", () => {
+  // Every single-leg side-view exercise, with the menu set to the leg that is NOT moving.
+  for (const [ex, errs] of [["heel_slide", [null, "hip_lifts"]], ["straight_leg_raise", [null, "knee_bends"]], ["sitting_knee_bend", [null, "slides_forward"]],
+    ["standing_knee_bend", [null, "thigh_swings"]], ["seated_knee_extension", [null, "not_straight"]], ["step_up", [null]]]) {
+    for (const err of errs) for (const moving of ["right", "left"]) {
+      const frames = [];
+      for (let t = 0; t < 3 * period() + 1; t += 1 / 30) {
+        const { lm, W, H } = synth(ex, "side", t, { op: moving, err });
+        frames.push(toFrame(lm, W, H, t));
+      }
+      const menu = moving === "left" ? "right" : "left";
+      const r = analyze(frames, EXERCISES[ex], { view: "side", op: menu, good: moving, facing: facingOf(frames[0]) });
+      assert.equal(r.leg, moving, `${ex}: tracked ${r.leg}`);
+      assert.equal(r.legAuto, true);
+      assert.equal(r.reps.length, 3, ex);
+      for (const rep of r.reps) assert.deepEqual(rep.errors.map((e) => e.id), err ? [err] : [], `${ex} ${err}`);
+    }
   }
-  const r = analyze(frames, EXERCISES.heel_slide, { view: "side", op: "left", good: "right", facing: 1 });
-  assert.equal(r.valid.length, 0);
-  assert.equal(r.reps.length, 0);
+});
+
+test("the tracked leg doesn't flip at rest, and the previous choice is kept unless the other leg clearly moves", () => {
+  const still = [], moving = [];
+  for (let t = 0; t < 1.4; t += 1 / 30) { const { lm, W, H } = synth("standing_knee_bend", "side", t, { op: "right" }); still.push(toFrame(lm, W, H, t)); }
+  for (let t = 0; t < 8; t += 1 / 30) { const { lm, W, H } = synth("standing_knee_bend", "side", t, { op: "right" }); moving.push(toFrame(lm, W, H, t)); }
+  const v = EXERCISES.standing_knee_bend.views.side;
+  assert.equal(chooseLeg(still, v, { view: "side", op: "left", facing: 1 }), "left");                    // nothing moved: keep the menu's leg
+  assert.equal(chooseLeg(still, v, { view: "side", op: "left", prefer: "right", facing: 1 }), "right");  // ...or the last choice
+  assert.equal(chooseLeg(moving, v, { view: "side", op: "left", facing: 1 }), "right");
+});
+
+test("one side only: with the shoulders out of the picture the leg is still measured, trunk checks are skipped", () => {
+  for (const ex of ["seated_knee_extension", "standing_knee_bend", "mini_squat"]) {
+    const frames = [];
+    for (let t = 0; t < 3 * period() + 1; t += 1 / 30) {
+      const { lm, W, H } = synth(ex, "side", t, { op: "right", err: ex === "mini_squat" ? "trunk_leans" : null });
+      for (const i of [0, 11, 12, 13, 14, 15, 16]) lm[i].visibility = 0.1;      // head, shoulders, arms not seen
+      frames.push(toFrame(lm, W, H, t));
+    }
+    const r = analyze(frames, EXERCISES[ex], { view: "side", op: "right", good: "left", facing: 1 });
+    assert.equal(r.reps.length, 3, ex);
+    assert.equal(r.valid.length, r.rows.length, ex);
+    for (const rep of r.reps) assert.deepEqual(rep.errors, [], ex);
+  }
+});
+
+test("view check: a side-on body with Front selected (and the reverse) is caught", () => {
+  const rec = (ex, view) => { const fr = []; for (let t = 0; t < 4; t += 1 / 15) { const { lm, W, H } = synth(ex, view, t, {}); fr.push(toFrame(lm, W, H, t)); } return fr; };
+  assert.equal(viewCheck(rec("seated_knee_extension", "side"), "front").mismatch, "side_as_front");
+  assert.equal(viewCheck(rec("seated_knee_extension", "side"), "side").mismatch, null);
+  assert.equal(viewCheck(rec("mini_squat", "front"), "side").mismatch, "front_as_side");
+  for (const [ex, view] of [["mini_squat", "front"], ["step_up", "front"], ["sit_to_stand", "front"], ["glute_bridge", "front"], ["side_lying_abduction", "front"],
+    ["heel_slide", "side"], ["glute_bridge", "side"], ["sit_to_stand", "side"]]) assert.equal(viewCheck(rec(ex, view), view).mismatch, null, `${ex}/${view}`);
+});
+
+test("a huge 'rep' at the end (getting up, walking to the phone) is rejected, not reported", () => {
+  const frames = [];
+  for (let t = 0; t < 3 * period() + 3; t += 1 / 30) {
+    const { lm, W, H } = synth("mini_squat", "front", Math.min(t, 3 * period() + 0.5), {});
+    const walk = t > 3 * period() + 1 && t < 3 * period() + 2.5 ? 0.25 : 0;       // whole body jumps down the picture
+    frames.push(toFrame(lm.map((q) => ({ ...q, y: q.y + walk })), W, H, t));
+  }
+  const r = analyze(frames, EXERCISES.mini_squat, { view: "front", op: "right", good: "left", facing: 1 });
+  assert.equal(r.reps.length, 3);
+  assert.equal(r.rejected, 1);
 });
 
 test("lying exercises: rotate for the model, unrotate, same landmarks", () => {

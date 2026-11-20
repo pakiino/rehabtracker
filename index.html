@@ -11,7 +11,7 @@
   <header class="bar">
     <div>
       <h1>Rehab tracker</h1>
-      <p class="sub">Knee exercises · v1.1</p>
+      <p class="sub">Knee exercises · v1.2</p>
     </div>
     <span id="modelStatus" class="chip">Loading pose model…</span>
   </header>
@@ -63,8 +63,9 @@
           <select id="facingCam"><option value="environment">Back</option>
             <option value="user">Front (selfie)</option></select></label>
         <label>Model
-          <select id="model"><option value="lite">Lite (faster)</option>
-            <option value="full">Full (more accurate)</option></select></label>
+          <select id="model"><option value="auto">Auto (best this device can run)</option>
+            <option value="lite">Lite (fastest)</option><option value="full">Full (more accurate)</option>
+            <option value="heavy">Heavy (most accurate, slow)</option></select></label>
         <label>Samples per second
           <input id="rate" type="number" min="5" max="30" step="1" value="15"></label>
         <label>Countdown before recording (s, 0 = none)
@@ -81,6 +82,7 @@
 
     <section id="results" class="card" hidden>
       <h2 id="resTitle">Session</h2>
+      <p id="setupWarn" class="setupwarn" hidden></p>
       <p id="evalBox" class="evalbox"></p>
       <div id="errSummary" class="errs"></div>
       <div id="stats" class="stats"></div>
