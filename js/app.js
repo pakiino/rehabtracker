@@ -22,7 +22,7 @@ const ui = {
   status: $("modelStatus"), value: $("value"), hint: $("hint"), reps: $("reps"), cue: $("cue"),
   sigLabel: $("sigLabel"), stage: $("stage"), exercise: $("exercise"), view: $("view"), op: $("op"),
   btnCamera: $("btnCamera"), btnRecord: $("btnRecord"), file: $("fileInput"),
-  count: $("count"), countNum: $("countNum"), countdown: $("countdown"), stopReps: $("stopReps"), saveVideo: $("saveVideo"),
+  count: $("count"), countNum: $("countNum"), countdown: $("countdown"), stopReps: $("stopReps"), saveVideo: $("saveVideo"), saveSound: $("saveSound"),
   rec: $("recBadge"), recTime: $("recTime"), progress: $("progress"), bar: $("progressBar"),
   facingCam: $("facingCam"), model: $("model"), rate: $("rate"), target: $("target"),
 };
@@ -134,11 +134,19 @@ function resetTracking() {
 // ---------- camera ----------
 async function startCamera() {
   if (state.stream) return stopCamera();
+  const videoC = { facingMode: ui.facingCam.value, width: { ideal: 1280 }, height: { ideal: 720 } };
+  const wantSound = ui.saveVideo.checked && ui.saveSound.checked;
   try {
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      audio: false, video: { facingMode: ui.facingCam.value, width: { ideal: 1280 }, height: { ideal: 720 } },
-    });
-  } catch (e) { setHint("Camera blocked. Allow camera access for this site and try again.", true); console.error(e); return; }
+    state.stream = await navigator.mediaDevices.getUserMedia({ audio: wantSound, video: videoC });
+  } catch (e) {
+    // Microphone refused or missing: carry on with the camera only.
+    if (wantSound) {
+      try { state.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoC }); }
+      catch (e2) { setHint("Camera blocked. Allow camera access for this site and try again.", true); console.error(e2); return; }
+      setHint("Microphone not allowed: the video will be saved without sound.", true);
+    } else { setHint("Camera blocked. Allow camera access for this site and try again.", true); console.error(e); return; }
+  }
+  video.muted = true; // never play the microphone back through the speaker
   video.removeAttribute("src");
   video.srcObject = state.stream;
   await video.play();
@@ -364,7 +372,11 @@ function cancelCountdown() {
 // The camera stream is recorded as-is (not mirrored, no overlay), so the saved video lines up
 // with the tracked points: time in the video = frame.t - video.t_offset_s in the JSON.
 function pickVideoType() {
-  for (const t of ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"]) {
+  const sound = state.stream?.getAudioTracks().length > 0;
+  const types = sound
+    ? ["video/mp4;codecs=avc1,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm"]
+    : ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
+  for (const t of types) {
     if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
   }
   return "";
@@ -661,11 +673,12 @@ ui.exercise.onchange = () => { fillViews(ui.view.value); renderExercise(); $("re
 ui.view.onchange = () => { renderExercise(); $("results").hidden = true; };
 ui.op.onchange = () => { renderExercise(); if (!$("results").hidden && state.rec) finalize(); };
 ui.target.onchange = () => { if (!$("results").hidden && state.rec) finalize(); };
-const saveSettings = () => { try { localStorage.setItem("rehabtracker.settings", JSON.stringify({ countdown: ui.countdown.value, stopReps: ui.stopReps.value, saveVideo: ui.saveVideo.checked })); } catch { /* optional */ } };
+const saveSettings = () => { try { localStorage.setItem("rehabtracker.settings", JSON.stringify({ countdown: ui.countdown.value, stopReps: ui.stopReps.value, saveVideo: ui.saveVideo.checked, saveSound: ui.saveSound.checked })); } catch { /* optional */ } };
 ui.countdown.onchange = saveSettings; ui.stopReps.onchange = saveSettings; ui.saveVideo.onchange = saveSettings;
+ui.saveSound.onchange = () => { saveSettings(); if (state.stream && !state.recording) { stopCamera(); startCamera(); } };
 try {
   const st = JSON.parse(localStorage.getItem("rehabtracker.settings") || "null");
-  if (st) { ui.countdown.value = st.countdown ?? 5; ui.stopReps.value = st.stopReps ?? ""; ui.saveVideo.checked = st.saveVideo ?? true; }
+  if (st) { ui.countdown.value = st.countdown ?? 5; ui.stopReps.value = st.stopReps ?? ""; ui.saveVideo.checked = st.saveVideo ?? true; ui.saveSound.checked = st.saveSound ?? false; }
 } catch { /* optional */ }
 ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
