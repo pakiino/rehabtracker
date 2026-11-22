@@ -11,16 +11,20 @@ import {
 } from "./geometry.js";
 import { topRows } from "./engine.js";
 
+// Calibrated 2026-11-20 against a PT-approved recording session (2 people, side views):
+// every rep was approved except standing knee bend reps 11-12 (trunk lean) and side-lying
+// abduction reps 2 and 10 (too high). Each limit sits just outside the approved reps.
+// Small sample: re-check with more people before clinical use.
 export const T = {
-  heel_slide: { hipLift: 0.12, riseS: 0.8, partial: 0.85 },
-  slr: { kneeBend: 10, trunkMove: 8, tooHigh: 60 },
+  heel_slide: { hipLift: 0.12, riseS: 0.8, partial: 0.7 },
+  slr: { kneeBend: 13, trunkMove: 8, tooHigh: 72 },
   sitting_bend: { hipForward: 0.10 },
-  standing_bend: { thighForward: 20, trunkLean: 15 },
-  seated_ext: { notStraight: 10, kickS: 0.6, leanBack: 10 },
-  sit_to_stand: { handsFrac: 0.3, handsDist: 0.25, trunkLean: 50, weightShift: 0.15 },
+  standing_bend: { thighForward: 20, trunkLean: 4 },
+  seated_ext: { notStraight: 18, kickS: 0.6, leanBack: 10 },
+  sit_to_stand: { handsFrac: 0.3, handsDist: 0.25, trunkLean: 62, weightShift: 0.15 },
   mini_squat: { tooDeep: 60, trunkLean: 30, valgus: 10 },
   step_up: { hipDrop: 6, valgus: 10 },
-  bridge: { arch: 190, partial: 165, pelvisTilt: 6 },
+  bridge: { arch: 195, partial: 165, pelvisTilt: 6 },
   abduction: { roll: 15, tooHigh: 45 },
 };
 

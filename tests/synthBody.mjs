@@ -136,7 +136,7 @@ export function synth(ex, view, t, o = {}) {
       legs: { [op]: { thighA: 90 + k / 2, flex: k }, [good]: straight(90) } });
     truth = { knee: k };
   } else if (ex === "straight_leg_raise") {
-    const lift = (err === "too_high" ? 70 : 40) * p;
+    const lift = (err === "too_high" ? 85 : 40) * p;
     const knee = 2 + (err === "knee_bends" ? 20 : 0) * p;
     const trunkA = -90 - (err === "back_arches" ? 14 : 0) * p;
     body = sideBody({ anchor: "hip", at: [0.45 * W, 0.66 * H], trunkA, op, L, armA: 80,
