@@ -198,7 +198,8 @@ export function synth(ex, view, t, o = {}) {
     // Operated foot on a step; knee straightens as the body rises.
     const k = 75 * (1 - p) + 3;
     const shankA = 0.25 * k;
-    body = sideBody({ anchor: "ankle", at: [0.55 * W, 0.86 * H - 0.08 * L], trunkA: 180 - 10 * (1 - p), op, L,
+    // The operated foot lifts onto the step (0.08 L) and comes back down with the rep.
+    body = sideBody({ anchor: "ankle", at: [0.55 * W, 0.86 * H - 0.08 * L * Math.min(1, 2 * p)], trunkA: 180 - 10 * (1 - p), op, L,
       legs: { [op]: { thighA: shankA + k, flex: k }, [good]: { thighA: 5, flex: 10 } }, armA: 30 });
     truth = { knee: k };
   } else if (ex === "step_up" && view === "front") {

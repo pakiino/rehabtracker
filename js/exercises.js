@@ -301,19 +301,23 @@ export const EXERCISES = {
     views: {
       side: {
         setup: "Stand side-on at a low step, operated leg nearest the phone. Step up with the operated leg, straighten it fully, step back down.",
-        autoLeg: "knee",       // the stepping leg is the one whose knee bends and straightens most
+        // Counted from the stepping foot: it lifts onto the step and stays there until it comes
+        // back down. This works for a full step-up and for a low step where the body barely rises
+        // (the hip rose only ~0.1 thigh lengths on a low stool in real recordings, too little to count).
+        autoLeg: "knee",       // the stepping leg is the one whose knee bends most
         metrics: (f, { leg }) => {
           const ok = legOk(f, leg);
           const w = ["left", "right"].filter((s) => vis(f.wrist[s])).map((s) => f.wrist[s][1] < f.hip[s][1] ? 1 : 0);
-          return { ok, hipUp: -f.hip[leg][1], thigh: thighLen(f, leg), knee: ok ? kneeFlex(f, leg) : NaN, handHigh: w.length ? Math.max(...w) : 0 };
+          return { ok, footUp: -f.ankle[leg][1], shank: dist(f.knee[leg], f.ankle[leg]), hipUp: -f.hip[leg][1], thigh: thighLen(f, leg),
+                   knee: ok ? kneeFlex(f, leg) : NaN, handHigh: w.length ? Math.max(...w) : 0 };
         },
-        signal: { key: "hipUp", scale: "thigh", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "thigh lengths" },
+        signal: { key: "footUp", scale: "shank", dir: 1, start: 0.12, end: 0.06, minExcursion: 0.18, label: "Foot on the step", unit: "shank lengths" },
         measure: (rep) => {
-          const firstHalf = rep.rows.slice(0, Math.max(1, Math.ceil(rep.peakIndex / 2)));
-          return { knee_at_start: robustMax(firstHalf.map((r) => r.knee)), knee_at_top: median(rep.rows.slice(Math.max(0, rep.peakIndex - 1), rep.peakIndex + 2).map((r) => r.knee)),
+          const th = median(rep.rows.map((r) => r.thigh)) || 1, hips = rep.rows.map((r) => r.hipUp);
+          return { knee_max: robustMax(rep.rows.map((r) => r.knee)), body_rise: (robustMax(hips) - Math.min(...hips.filter(Number.isFinite))) / th,
                    hand_on_rail: median(rep.rows.map((r) => r.handHigh)) >= 0.5 };
         },
-        summaryKeys: ["knee_at_start", "knee_at_top", "hand_on_rail"],
+        summaryKeys: ["knee_max", "body_rise", "hand_on_rail"],
         checks: [],
       },
       front: {

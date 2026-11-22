@@ -105,7 +105,9 @@ export function analyze(frames, ex, ctx, opts = {}) {
   if (valid.length >= 20) {
     const sorted = valid.map((r) => sig.dir * r.signal).sort((a, b) => a - b);
     const p15 = sorted[Math.floor(sorted.length * 0.15)];
-    if (sig.dir * base.signal - p15 > sig.start * 0.5) base = baseOf(valid.filter((r) => sig.dir * r.signal <= p15));
+    // Also when the first second sits well BELOW the usual resting level (the person settled
+    // after starting), or no rep would ever drop back far enough to end.
+    if (Math.abs(sig.dir * base.signal - p15) > sig.start * 0.5) base = baseOf(valid.filter((r) => sig.dir * r.signal <= p15));
   }
   let cur = null, sinceRest = [];
   const endThr = sig.end ?? sig.start / 2;
