@@ -3,7 +3,7 @@
 import { FilesetResolver, PoseLandmarker } from
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs";
 import { toFrame, facingOf, vis, rotationForHead, unrotateLandmarks, drawRotated, VIS_OK } from "./geometry.js";
-import { analyze, liveCue } from "./engine.js";
+import { analyze, liveCue, viewCheck } from "./engine.js";
 import { PoseSmoother, Debounced } from "./smooth.js";
 import { EXERCISES, ORDER, T } from "./exercises.js";
 
@@ -11,8 +11,9 @@ const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
 const MODEL_URLS = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+  heavy: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
 };
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 const ROTATION_CYCLE = [90, -90, 0];
 const LIVE_WINDOW_S = 40;
 
@@ -37,6 +38,7 @@ const state = {
   warnLatch: new Debounced({ onS: 0.6, offS: 0.3, minShowS: 0.8 }),
   noPoseSince: null, poseRun: 0, headVotes: 0, lyingRun: 0, flipRun: 0, uprightRun: 0,
   countdownTimer: null, audio: null, valueAt: -Infinity,
+  trackedLeg: null, viewWarn: null, slow: false, fpsT0: 0, fpsN: 0, slowRuns: 0,
 };
 window.__tracker = state; // for browser tests (no personal data)
 
@@ -67,10 +69,15 @@ const fmtKey = (k, v, sigUnit) => {
 
 const ex = () => EXERCISES[ui.exercise.value];
 const vw = () => ex().views[ui.view.value];
+// Side views track one leg, chosen from the movement (engine.chooseLeg). ctxNow() lets the
+// engine choose (keeping the last choice unless the other leg clearly moves); frameCtx()
+// is for measuring a single frame with the leg chosen so far.
 const ctxNow = (facing = state.facing ?? 1) => {
   const op = ui.op.value;
-  return { view: ui.view.value, op, good: op === "left" ? "right" : "left", facing };
+  return { view: ui.view.value, op, good: op === "left" ? "right" : "left", facing, prefer: state.trackedLeg ?? op };
 };
+const trackedLeg = () => (vw().autoLeg ? state.trackedLeg ?? ui.op.value : ui.op.value);
+const frameCtx = () => ({ ...ctxNow(), leg: trackedLeg() });
 const opts = () => { const t = Number(ui.target.value); return ui.target.value !== "" && Number.isFinite(t) ? { target: t } : {}; };
 
 // ---------- model ----------
@@ -98,6 +105,21 @@ async function loadModel(kind) {
   setHint("Could not load the pose model. Check the connection and reload.", true);
 }
 function nextTs(p) { state.lastTs = Math.max(p, state.lastTs + 1); return state.lastTs; }
+// "Auto": the more accurate Full model, dropping to Lite only if this device can't keep up
+// with the live camera. A saved video is never in a hurry, so it always gets Full.
+const wantModel = (forVideo) => (ui.model.value !== "auto" ? ui.model.value : !forVideo && state.slow ? "lite" : "full");
+async function ensureModel(kind) { if (state.modelKind !== kind || !state.landmarker) await loadModel(kind); }
+function watchSpeed(now) {
+  state.fpsN++;
+  if (now - state.fpsT0 < 3000) return;
+  const fps = (state.fpsN * 1000) / (now - state.fpsT0);
+  state.fpsT0 = now; state.fpsN = 0;
+  state.slowRuns = fps < 9 ? state.slowRuns + 1 : 0;
+  if (ui.model.value === "auto" && state.modelKind === "full" && state.slowRuns >= 2 && !state.recording && !state.countdownTimer) {
+    state.slow = true; state.slowRuns = 0;
+    loadModel("lite").then(() => setStatus(`Model ready · lite (this device is too slow for full) · ${state.delegate}`, "ok"));
+  }
+}
 
 // ---------- menus ----------
 function fillExercises() {
@@ -128,7 +150,7 @@ const signalLabel = (sig) => sig.unit === "°"
 function resetTracking() {
   state.rotation = 0; state.smoother.reset(); state.cueLatch.reset(); state.warnLatch.reset();
   Object.assign(state, { facing: null, facingVotes: 0, noPoseSince: null, poseRun: 0, headVotes: 0, lyingRun: 0,
-    flipRun: 0, uprightRun: 0, valueAt: -Infinity });
+    flipRun: 0, uprightRun: 0, valueAt: -Infinity, trackedLeg: null, viewWarn: null });
 }
 
 // ---------- camera ----------
@@ -155,6 +177,8 @@ async function startCamera() {
   ui.stage.classList.toggle("mirror", ui.facingCam.value === "user");
   ui.btnCamera.textContent = "Stop camera"; ui.btnRecord.disabled = false;
   state.live = []; state.t0 = performance.now(); resetTracking();
+  Object.assign(state, { fpsT0: performance.now() + 2000, fpsN: 0, slowRuns: 0 });   // first 2 s (warm-up) don't count
+  ensureModel(wantModel(false));
   try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch { /* optional */ }
   state.looping = true;
   requestAnimationFrame(loop);
@@ -174,12 +198,14 @@ function sizeCanvas() {
   ui.stage.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
 }
 function loop() {
-  if (!state.looping || !state.landmarker) return;
-  if (video.readyState >= 2 && video.currentTime !== state.lastVideoTime) {
+  if (!state.looping) return;
+  // No model for a moment (it is being switched): keep the loop alive and wait.
+  if (state.landmarker && video.readyState >= 2 && video.currentTime !== state.lastVideoTime) {
     state.lastVideoTime = video.currentTime;
     if (video.videoWidth && canvas.width !== video.videoWidth) sizeCanvas();
     const now = performance.now();
     onPose(detect(nextTs(now)), (now - state.t0) / 1000, true);
+    watchSpeed(now);
   }
   requestAnimationFrame(loop);
 }
@@ -255,26 +281,22 @@ function onPose(lm, t, live) {
   drawBody(f);
   const v = vw(), sig = v.signal;
   if (ui.view.value === "side") {
-    const fc = facingOf(f, ui.op.value);
+    const fc = facingOf(f);
     state.facingVotes = (state.facingVotes ?? 0) * 0.9 + fc;   // smoothed vote
     state.facing = state.facingVotes >= 0 ? 1 : -1;
   }
-  const ctx = ctxNow();
+  const ctx = frameCtx();
   const m = v.metrics(f, ctx);
   state.live.push(f);
   while (state.live.length && state.live[0].t < t - LIVE_WINDOW_S && !state.recording) state.live.shift();
   // Warnings and the big number are debounced so they don't flash on a single bad frame.
-  let problem = null;
-  if (!m.ok) {
-    const o = ctx.good, Leg = (x) => (x === "left" ? "left" : "right");
-    const otherClear = ui.view.value === "side" && vis(f.hip[o], f.knee[o], f.ankle[o]) && !vis(f.hip[ctx.op], f.knee[ctx.op], f.ankle[ctx.op]);
-    problem = otherClear
-      ? `Can't see the ${Leg(ctx.op)} leg clearly, but the ${Leg(o)} leg is clear. Turn so the operated leg is nearest the phone, or change Operated leg.`
-      : `Can't see all the points this exercise needs: ${ex().tracks.toLowerCase()}. Keep the whole body in the picture.`;
-  }
+  const problem = !m.ok
+    ? (v.autoLeg ? "Can't see a whole leg (hip, knee and ankle). Keep the leg and hip in the picture, side-on to the phone."
+      : `Can't see all the points this exercise needs: ${ex().tracks.toLowerCase()}. Keep the whole body in the picture.`)
+    : state.viewWarn;
   const warn = state.warnLatch.update(problem, t);
   if (warn) setHint(warn, true);
-  else setHint(`${ui.op.value === "left" ? "Left" : "Right"} leg${state.recording ? " · recording" : state.countdownTimer ? " · get ready" : ""}`, false);
+  else setHint(`${v.autoLeg ? "Tracking one leg" : `${ui.op.value === "left" ? "Left" : "Right"} leg`}${state.recording ? " · recording" : state.countdownTimer ? " · get ready" : ""}`, false);
 
   if (m.ok && t - state.valueAt >= 0.12) {
     state.valueAt = t;
@@ -287,7 +309,8 @@ function onPose(lm, t, live) {
     const src = state.recording ? state.rec.frames : state.live;
     if (src.length > 10) {
       const r = analyze(src, ex(), ctxNow(), opts());
-      state.liveResult = r;
+      state.liveResult = r; state.trackedLeg = r.leg;
+      state.viewWarn = viewWarning(src.slice(-45), ui.view.value, true);
       const last = r.reps[r.reps.length - 1];
       ui.reps.textContent = `${state.recording ? "Reps" : "Practice reps (not recording)"}: ${r.reps.length}` + (last ? ` · last: ${last.errors.length ? last.errors.map((e) => e.label).join("; ") : "no errors"}` : "");
     }
@@ -312,29 +335,56 @@ function onPose(lm, t, live) {
   ui.recTime.textContent = `${Math.round(t - state.rec.frames[0].t)} s`;
 }
 
+// Warnings about how the person is set up, from the last few seconds of frames.
+function viewWarning(frames, view, live) {
+  const vc = viewCheck(frames, view);
+  if (vc.mismatch === "side_as_front") return live
+    ? "This looks like a side view, but Camera view is set to Front. Face the phone, or change Camera view to Side."
+    : "The body was side-on to the camera, but Camera view was set to Front. These numbers are not reliable: change Camera view to Side (the results update).";
+  if (vc.mismatch === "front_as_side") return live
+    ? "Turn side-on to the phone. Facing it makes the angles read too small."
+    : "The body was facing the camera rather than side-on, so the angles read smaller than they are. Re-record side-on.";
+  const noHead = frames.filter((f) => !vis(f.nose)).length;
+  if (frames.length >= 10 && noHead > 0.8 * frames.length && !vw().lying) return live
+    ? "Keep your head in the picture too: the tracker finds the body from the face and is less accurate without it."
+    : "The head was out of the picture for most of the recording. The tracker finds the body from the face, so joints can be misplaced: re-record with head to feet in view.";
+  return null;
+}
+
 function showCue(text) { ui.cue.hidden = !text; ui.cue.textContent = text ?? ""; }
 
-const BONES = [["shoulder", "hip"], ["hip", "knee"], ["knee", "ankle"], ["ankle", "heel"], ["heel", "toe"], ["ankle", "toe"],
-  ["shoulder", "elbow"], ["elbow", "wrist"]];
+const LEG = [["hip", "knee"], ["knee", "ankle"], ["ankle", "heel"], ["heel", "toe"], ["ankle", "toe"]];
+const ARM = [["shoulder", "elbow"], ["elbow", "wrist"]];
 function drawBody(f) {
-  const lw = Math.max(3, canvas.width / 180), op = ui.op.value;
+  const lw = Math.max(3, canvas.width / 180), blue = "#3987e5", gray = "#8f8e86";
   g.lineCap = "round";
   const seg = (a, b, color, w) => {
     if (!vis(a, b)) return;
     g.strokeStyle = color; g.lineWidth = w; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
   };
-  seg(f.shoulder.left, f.shoulder.right, "#8f8e86", lw * 0.7);
-  seg(f.hip.left, f.hip.right, "#8f8e86", lw * 0.7);
-  for (const s of [op === "left" ? "right" : "left", op]) {
-    const color = s === op ? "#3987e5" : "#8f8e86", w = s === op ? lw : lw * 0.7;
-    for (const [a, b] of BONES) seg(f[a][s], f[b][s], color, w);
-  }
-  for (const s of ["left", "right"]) for (const name of ["shoulder", "hip", "knee", "ankle", "wrist"]) {
-    const p = f[name][s];
-    g.beginPath(); g.arc(p[0], p[1], lw * (s === op ? 1.5 : 1.1), 0, 2 * Math.PI);
+  const dot = (p, big) => {
+    g.beginPath(); g.arc(p[0], p[1], lw * (big ? 1.5 : 1.1), 0, 2 * Math.PI);
     g.fillStyle = p[2] >= VIS_OK ? "#f0efec" : "#e66767"; g.fill();
     g.lineWidth = lw / 2; g.strokeStyle = "#121211"; g.stroke();
+  };
+  if (ui.view.value === "side") {
+    // Side view: only what is measured. The tracked leg, and the trunk line on the same side.
+    const s = trackedLeg(), o = s === "left" ? "right" : "left";
+    const sh = vis(f.shoulder[s]) || !vis(f.shoulder[o]) ? f.shoulder[s] : f.shoulder[o];
+    seg(sh, f.hip[s], gray, lw * 0.7);
+    for (const [a, b] of LEG) seg(f[a][s], f[b][s], blue, lw);
+    for (const name of ["hip", "knee", "ankle"]) dot(f[name][s], true);
+    if (vis(sh)) dot(sh, false);
+    return;
   }
+  const op = ui.op.value;
+  seg(f.shoulder.left, f.shoulder.right, gray, lw * 0.7);
+  seg(f.hip.left, f.hip.right, gray, lw * 0.7);
+  for (const s of [op === "left" ? "right" : "left", op]) {
+    const color = s === op ? blue : gray, w = s === op ? lw : lw * 0.7;
+    for (const [a, b] of [["shoulder", "hip"], ...LEG, ...ARM]) seg(f[a][s], f[b][s], color, w);
+  }
+  for (const s of ["left", "right"]) for (const name of ["shoulder", "hip", "knee", "ankle", "wrist"]) dot(f[name][s], s === op);
 }
 
 function setHint(text, warn) { ui.hint.textContent = text; ui.hint.classList.toggle("warn", warn); }
@@ -462,9 +512,11 @@ function beep(freq, dur) {
 }
 
 async function analyzeFile(file) {
-  if (!file || !state.landmarker) return;
+  if (!file) return;
   stopCamera();
   state.video = null; $("btnShareVideo").hidden = true; $("btnDownloadVideo").hidden = true;
+  await ensureModel(wantModel(true));
+  if (!state.landmarker) return;
   ui.stage.classList.remove("mirror");
   video.src = URL.createObjectURL(file);
   await once(video, "loadedmetadata");
@@ -487,9 +539,9 @@ async function analyzeFile(file) {
 }
 const once = (el, ev) => new Promise((r) => el.addEventListener(ev, r, { once: true }));
 
-// Facing direction for a side view: majority over the recording (toes ahead of heels).
-function recFacing(frames, op) {
-  const votes = frames.map((f) => facingOf(f, op));
+// Facing direction for a side view: majority over the recording.
+function recFacing(frames) {
+  const votes = frames.map((f) => facingOf(f));
   return votes.reduce((a, b) => a + b, 0) >= 0 ? 1 : -1;
 }
 
@@ -497,9 +549,10 @@ function recFacing(frames, op) {
 function finalize() {
   const rec = state.rec;
   if (!rec || rec.frames.length < 10) { setHint("Too few frames with a person in them. Record a few reps.", true); return; }
-  const e = ex(), v = vw(), ctx = ctxNow(ui.view.value === "side" ? recFacing(rec.frames, ui.op.value) : 1);
+  const e = ex(), v = vw(), ctx = { ...ctxNow(ui.view.value === "side" ? recFacing(rec.frames) : 1), prefer: ui.op.value };
   const r = analyze(rec.frames, e, ctx, opts());
   state.result = r;
+  r.setupWarning = viewWarning(rec.frames, ctx.view, false);
   const rotUsed = Object.entries(rec.rotations).sort((a, b) => b[1] - a[1])[0]?.[0];
   const clean = (x) => (typeof x === "number" ? Math.round(x * 1000) / 1000 : x);
   const repOut = r.reps.map((rep) => {
@@ -513,7 +566,10 @@ function finalize() {
     patient_id: null, exercise: e.id, exercise_label: e.label, camera_view: ctx.view, operated_leg: ctx.op,
     facing: ui.view.value === "side" ? (ctx.facing > 0 ? "image_right" : "image_left") : "camera",
     rep_signal: { key: v.signal.key, label: v.signal.label, unit: v.signal.unit },
-    reps_count: r.reps.length, last_rep_unfinished: r.unfinished,
+    tracking: v.autoLeg ? "one leg, chosen from the movement (side view); the camera's own left/right label is not trusted" : "both sides (front view)",
+    tracked_leg_camera_label: r.leg,
+    setup_warning: r.setupWarning, view_check: viewCheck(rec.frames, ctx.view),
+    reps_count: r.reps.length, last_rep_unfinished: r.unfinished, reps_rejected_as_not_exercise: r.rejected,
     reps: repOut,
     error_counts: r.summary.errors,
     checks: v.checks.map((c) => c.id),
@@ -541,6 +597,8 @@ function finalize() {
 
 function renderResults(r, e, v, rec) {
   $("resTitle").textContent = `${e.label} · ${ui.view.value} view · ${ui.op.value} leg`;
+  $("setupWarn").hidden = !r.setupWarning; $("setupWarn").textContent = r.setupWarning ?? "";
+  $("results").classList.toggle("unreliable", viewCheck(rec.frames, ui.view.value).mismatch === "side_as_front");
   const sig = v.signal, n = r.reps.length;
   const withErr = r.reps.filter((x) => x.errors.length).length;
   $("evalBox").innerHTML = n
@@ -561,6 +619,8 @@ function renderResults(r, e, v, rec) {
     `<span class="v">${fmtKey(k, r.summary.median[k], sig.unit)}</span></div>`).join("");
   const q = [`${r.valid.length} of ${r.rows.length} frames had every point this exercise needs.`];
   if (rec.noPose) q.push(`${rec.noPose} frames had no person.`);
+  if (v.autoLeg) q.push("Side view: one leg was tracked, the one that moved.");
+  if (r.rejected) q.push(`${r.rejected} movement${r.rejected > 1 ? "s" : ""} far bigger than the reps (getting up or walking to the phone) ${r.rejected > 1 ? "were" : "was"} left out.`);
   if (r.valid.length < r.rows.length * 0.6) q.push("Many frames were missing points: re-record with the camera set up as described.");
   $("quality").textContent = q.join(" ");
   drawChart(r);
@@ -605,12 +665,16 @@ function drawChart(r) {
   if (rows.length < 2) return;
   const t0 = r.rows[0].t, tMax = Math.max(t0 + 1, r.rows[r.rows.length - 1].t);
   const vals = rows.map(val);
-  let lo = Math.min(...vals), hi = Math.max(...vals);
+  // Scale to the reps and the bulk of the signal (2nd to 98th percentile), so one spike
+  // (getting up at the end) doesn't flatten everything else. Values beyond are clipped.
+  const sorted = [...vals].sort((a, b) => a - b), q = (p) => sorted[Math.round(p * (sorted.length - 1))];
+  const repVals = r.reps.flatMap((rep) => rep.rows.map(val));
+  let lo = Math.min(q(0.02), ...repVals), hi = Math.max(q(0.98), ...repVals);
   const pad = (hi - lo) * 0.1 || 1; lo -= pad; hi += pad;
   const step = niceStep((hi - lo) / 4);
   lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
   const x = (t) => m.l + ((t - t0) / (tMax - t0)) * (W - m.l - m.r);
-  const y = (v) => H - m.b - ((v - lo) / (hi - lo)) * (H - m.t - m.b);
+  const y = (v) => H - m.b - ((Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo)) * (H - m.t - m.b);
   for (const rep of r.reps) {
     svg.append(el("rect", { class: rep.errors.length ? "band err" : "band", x: x(rep.t_start), y: m.t,
       width: Math.max(2, x(rep.t_end) - x(rep.t_start)), height: H - m.t - m.b, rx: 4 }));
@@ -681,8 +745,11 @@ try {
 } catch { fillViews(); }
 renderExercise();
 
-ui.exercise.onchange = () => { fillViews(ui.view.value); renderExercise(); $("results").hidden = true; };
-ui.view.onchange = () => { renderExercise(); $("results").hidden = true; };
+// Changing the exercise or view re-analyzes the last recording with the new choice, so a
+// recording made with the wrong menu setting doesn't have to be redone.
+const reanalyze = () => { if (!$("results").hidden && state.rec && !state.recording) finalize(); else $("results").hidden = true; };
+ui.exercise.onchange = () => { fillViews(ui.view.value); renderExercise(); reanalyze(); };
+ui.view.onchange = () => { renderExercise(); reanalyze(); };
 ui.op.onchange = () => { renderExercise(); if (!$("results").hidden && state.rec) finalize(); };
 ui.target.onchange = () => { if (!$("results").hidden && state.rec) finalize(); };
 const saveSettings = () => { try { localStorage.setItem("rehabtracker.settings", JSON.stringify({ countdown: ui.countdown.value, stopReps: ui.stopReps.value, saveVideo: ui.saveVideo.checked, saveSound: ui.saveSound.checked })); } catch { /* optional */ } };
@@ -695,7 +762,7 @@ try {
 ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
 ui.file.onchange = (e) => analyzeFile(e.target.files[0]).finally(() => { e.target.value = ""; });
-ui.model.onchange = () => loadModel(ui.model.value);
+ui.model.onchange = () => { state.slow = false; loadModel(wantModel(false)); };
 ui.facingCam.onchange = () => { if (state.stream) { stopCamera(); startCamera(); } };
 $("btnShare").onclick = () => share();
 $("btnDownload").onclick = () => state.session && download();
@@ -708,4 +775,4 @@ document.addEventListener("visibilitychange", async () => {
   }
 });
 if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) setHint("Camera needs HTTPS. Open the GitHub Pages link.", true);
-loadModel("lite");
+loadModel(wantModel(false));

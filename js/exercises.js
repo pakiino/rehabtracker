@@ -25,29 +25,37 @@ export const T = {
 };
 
 // ---------- shared metric helpers ----------
-const shoulderOf = (f, s) => (vis(f.shoulder[s]) ? f.shoulder[s] : mid(f.shoulder.left, f.shoulder.right));
+// Side views use ONE side of the body: the tracked leg and the shoulder on the same side
+// (in a side view the two shoulders overlap, so the other one stands in if it is the clearer).
+const otherSide = (s) => (s === "left" ? "right" : "left");
+const shoulderOf = (f, s) => (vis(f.shoulder[s]) || !vis(f.shoulder[otherSide(s)]) ? f.shoulder[s] : f.shoulder[otherSide(s)]);
 const hipMid = (f) => mid(f.hip.left, f.hip.right);
-const shMid = (f) => mid(f.shoulder.left, f.shoulder.right);
 const legOk = (f, s) => vis(f.hip[s], f.knee[s], f.ankle[s]);
 const kneeFlex = (f, s) => flexion(f.hip[s], f.knee[s], f.ankle[s]);
 const thighLen = (f, s) => dist(f.hip[s], f.knee[s]);
 const hipWidth = (f) => dist(f.hip.left, f.hip.right);
-// Signed trunk lean from vertical (hip mid -> shoulder mid); + = forward (facing direction).
-const trunkLean = (f, facing) => leanFromUp(hipMid(f), shMid(f), facing);
+// Signed trunk lean from vertical (hip -> shoulder on the tracked side); + = forward (facing
+// direction). NaN when no shoulder is visible: the trunk checks are then skipped, the leg is still measured.
+const trunkLean = (f, s, facing) => (vis(shoulderOf(f, s)) ? leanFromUp(f.hip[s], shoulderOf(f, s), facing) : NaN);
 // Signed thigh angle from vertical-down; + = knee in front of the hip.
 const thighForward = (f, s, facing) => {
   const h = f.hip[s], k = f.knee[s];
   return (Math.atan2((k[0] - h[0]) * facing, k[1] - h[1]) * 180) / Math.PI;
 };
-// Front view: knee deviation from the hip-ankle line, + = toward the body's midline (valgus).
-function valgus(f, s) {
+// Front view: how far the knee sits inside the hip-ankle line, in pixels (+ = toward the
+// body's midline). Turned into an angle with the STANDING leg length (kneeInDeg), not the
+// leg as drawn in that frame: a bent knee points at the camera, the leg looks short, and the
+// plain hip-knee-ankle angle then explodes (it read 55 degrees on a real step-up).
+function kneeInPx(f, s) {
   const h = f.hip[s], k = f.knee[s], a = f.ankle[s];
-  if (a[1] === h[1]) return NaN;
+  if (Math.abs(a[1] - h[1]) < 1) return NaN;
   const lineX = h[0] + (a[0] - h[0]) * (k[1] - h[1]) / (a[1] - h[1]);
-  const towardMid = Math.sign(hipMid(f)[0] - h[0]) || 1;
-  const dev = flexion(h, k, a);
-  return Math.sign((k[0] - lineX) * towardMid) * dev;
+  return (k[0] - lineX) * (Math.sign(hipMid(f)[0] - h[0]) || 1);
 }
+const legLen = (f, s) => dist(f.hip[s], f.knee[s]) + dist(f.knee[s], f.ankle[s]);
+const deg = (r) => (r * 180) / Math.PI;
+// Same number as the hip-knee-ankle angle when the leg is nearly straight and seen from the front.
+const kneeInDeg = (px, standingLegLen) => 2 * deg(Math.atan((2 * px) / standingLegLen));
 // Shoulder-hip-knee angle, signed so 180 = straight line, > 180 = hips pushed above the line.
 function hipLine(f, s) {
   const sh = shoulderOf(f, s), h = f.hip[s], k = f.knee[s];
@@ -67,9 +75,10 @@ export const EXERCISES = {
         lying: true,
         setup: "Lie on your back, side-on to the phone (landscape, on the floor, about 2 m away, operated leg nearest). " +
                "Slowly slide the heel toward your buttock as far as you can, then back. Repeat.",
-        metrics: (f, { op }) => {
-          const ok = legOk(f, op);
-          return { ok, knee: ok ? kneeFlex(f, op) : NaN, hipY: f.hip[op][1], thigh: thighLen(f, op) };
+        autoLeg: "moving",
+        metrics: (f, { leg }) => {
+          const ok = legOk(f, leg);
+          return { ok, knee: ok ? kneeFlex(f, leg) : NaN, hipY: f.hip[leg][1], thigh: thighLen(f, leg) };
         },
         signal: { key: "knee", dir: 1, start: 20, end: 10, minExcursion: 25, label: "Knee bend", unit: "°" },
         measure: (rep) => ({
@@ -96,11 +105,12 @@ export const EXERCISES = {
         lying: true,
         setup: "Lie on your back, side-on to the phone (landscape, on the floor, operated leg nearest). Bend the other knee. " +
                "Tighten the thigh, lift the straight leg to the height of the other knee, hold, lower slowly.",
-        metrics: (f, { op }) => {
-          const sh = shoulderOf(f, op);
-          const ok = legOk(f, op) && vis(sh);
-          return { ok, lift: ok ? flexion(sh, f.hip[op], f.knee[op]) : NaN, knee: ok ? kneeFlex(f, op) : NaN,
-                   trunk: ok ? leanFromUp(f.hip[op], sh) : NaN };
+        autoLeg: "moving",
+        metrics: (f, { leg }) => {
+          const sh = shoulderOf(f, leg);
+          const ok = legOk(f, leg) && vis(sh);
+          return { ok, lift: ok ? flexion(sh, f.hip[leg], f.knee[leg]) : NaN, knee: ok ? kneeFlex(f, leg) : NaN,
+                   trunk: ok ? leanFromUp(f.hip[leg], sh) : NaN };
         },
         signal: { key: "lift", dir: 1, start: 15, end: 8, minExcursion: 20, label: "Leg lift", unit: "°" },
         measure: (rep, ctx) => {
@@ -125,9 +135,10 @@ export const EXERCISES = {
       side: {
         setup: "Sit side-on on a firm chair, phone at knee height about 2 m away, operated leg nearest. " +
                "Slide the foot back under the chair to bend the knee as far as you can, hold, return.",
-        metrics: (f, { op }) => {
-          const ok = legOk(f, op);
-          return { ok, knee: ok ? kneeFlex(f, op) : NaN, hipX: f.hip[op][0], thigh: thighLen(f, op) };
+        autoLeg: "moving",
+        metrics: (f, { leg }) => {
+          const ok = legOk(f, leg);
+          return { ok, knee: ok ? kneeFlex(f, leg) : NaN, hipX: f.hip[leg][0], thigh: thighLen(f, leg) };
         },
         signal: { key: "knee", dir: 1, start: 8, end: 4, minExcursion: 10, label: "Knee bend", unit: "°" },
         measure: (rep, { facing }) => ({
@@ -145,13 +156,14 @@ export const EXERCISES = {
   },
 
   standing_knee_bend: {
-    label: "Standing knee bend", start: "Standing, holding chair", tracks: "Shoulder, hip, knee, ankle, heel (operated leg), wrist",
+    label: "Standing knee bend", start: "Standing, holding chair", tracks: "Hip, knee, ankle of the bending leg (shoulder for the trunk check)",
     views: {
       side: {
         setup: "Stand side-on holding a chair, operated leg nearest the phone. Bend the knee to bring the heel toward your buttock, keeping the thigh pointing down.",
-        metrics: (f, { op, facing }) => {
-          const ok = legOk(f, op) && vis(f.shoulder.left, f.shoulder.right);
-          return { ok, knee: ok ? kneeFlex(f, op) : NaN, thigh: thighForward(f, op, facing), trunk: trunkLean(f, facing) };
+        autoLeg: "moving",
+        metrics: (f, { leg, facing }) => {
+          const ok = legOk(f, leg);
+          return { ok, knee: ok ? kneeFlex(f, leg) : NaN, thigh: thighForward(f, leg, facing), trunk: trunkLean(f, leg, facing) };
         },
         signal: { key: "knee", dir: 1, start: 20, end: 10, minExcursion: 30, label: "Knee bend", unit: "°" },
         measure: (rep, ctx) => {
@@ -170,13 +182,14 @@ export const EXERCISES = {
   },
 
   seated_knee_extension: {
-    label: "Seated knee extension", start: "Seated on chair", tracks: "Shoulder, hip, knee, ankle (operated leg)",
+    label: "Seated knee extension", start: "Seated on chair", tracks: "Hip, knee, ankle of the straightening leg (shoulder for the trunk check)",
     views: {
       side: {
         setup: "Sit side-on on a chair, operated leg nearest the phone. Slowly straighten the knee fully, hold, then lower.",
-        metrics: (f, { op, facing }) => {
-          const ok = legOk(f, op) && vis(f.shoulder.left, f.shoulder.right);
-          return { ok, knee: ok ? kneeFlex(f, op) : NaN, trunk: trunkLean(f, facing) };
+        autoLeg: "moving",
+        metrics: (f, { leg, facing }) => {
+          const ok = legOk(f, leg);
+          return { ok, knee: ok ? kneeFlex(f, leg) : NaN, trunk: trunkLean(f, leg, facing) };
         },
         signal: { key: "knee", dir: -1, start: 20, end: 10, minExcursion: 30, label: "Knee angle", unit: "°" },
         measure: (rep) => ({ short_of_straight: rep.peak, lean_back: deltaMax(rep.rows, "trunk", rep.base, -1) }),
@@ -196,13 +209,13 @@ export const EXERCISES = {
     views: {
       side: {
         setup: "Sit side-on on a firm chair, arms crossed on your chest, phone about 2–3 m away. Stand up fully, then sit down slowly. Repeat.",
-        metrics: (f, { op, facing }) => {
-          const s = legOk(f, op) ? op : (op === "left" ? "right" : "left");
-          const ok = legOk(f, s) && vis(f.shoulder.left, f.shoulder.right);
+        autoLeg: "visible",
+        metrics: (f, { leg: s, facing }) => {
+          const ok = legOk(f, s);
           const th = thighLen(f, s);
           const wd = ["left", "right"].filter((w) => vis(f.wrist[w]) && legOk(f, w))
             .map((w) => distToSegment(f.wrist[w], f.hip[w], f.knee[w]) / th);
-          return { ok, knee: ok ? kneeFlex(f, s) : NaN, trunk: trunkLean(f, facing), wristThigh: wd.length ? Math.min(...wd) : NaN };
+          return { ok, knee: ok ? kneeFlex(f, s) : NaN, trunk: trunkLean(f, s, facing), wristThigh: wd.length ? Math.min(...wd) : NaN };
         },
         signal: { key: "knee", dir: -1, start: 25, end: 12, minExcursion: 40, label: "Knee angle", unit: "°" },
         measure: (rep) => {
@@ -244,9 +257,10 @@ export const EXERCISES = {
     views: {
       side: {
         setup: "Stand side-on holding a chair, phone 2–3 m away at hip height. Bend both knees a little (mini squat), then straighten.",
-        metrics: (f, { op, facing }) => {
-          const ok = legOk(f, op) && vis(f.shoulder.left, f.shoulder.right);
-          return { ok, knee: ok ? kneeFlex(f, op) : NaN, trunk: trunkLean(f, facing) };
+        autoLeg: "visible",
+        metrics: (f, { leg, facing }) => {
+          const ok = legOk(f, leg);
+          return { ok, knee: ok ? kneeFlex(f, leg) : NaN, trunk: trunkLean(f, leg, facing) };
         },
         signal: { key: "knee", dir: 1, start: 10, end: 5, minExcursion: 15, label: "Knee bend", unit: "°" },
         measure: (rep) => ({ depth: rep.peak, trunk_lean: deltaMax(rep.rows, "trunk", rep.base) }),
@@ -262,19 +276,21 @@ export const EXERCISES = {
         setup: "Stand facing the phone holding a chair, feet hip-width apart, phone 2–3 m away at hip height. Bend both knees a little, then straighten.",
         metrics: (f) => {
           const ok = legOk(f, "left") && legOk(f, "right");
-          return { ok, hipDown: hipMid(f)[1], hw: hipWidth(f), valgusL: valgus(f, "left"), valgusR: valgus(f, "right") };
+          return { ok, hipDown: hipMid(f)[1], hw: hipWidth(f), inL: kneeInPx(f, "left"), inR: kneeInPx(f, "right"),
+                   lenL: legLen(f, "left"), lenR: legLen(f, "right") };
         },
         signal: { key: "hipDown", scale: "hw", dir: 1, start: 0.06, end: 0.03, minExcursion: 0.09, label: "Hip drop", unit: "hip widths" },
         measure: (rep) => {
           const top = topRows(rep, EXERCISES.mini_squat.views.front.signal, 0.5);
-          return { valgus_left: robustMax(top.map((r) => r.valgusL)), valgus_right: robustMax(top.map((r) => r.valgusR)) };
+          return { valgus_left: kneeInDeg(robustMax(top.map((r) => r.inL - rep.base.inL)), rep.base.lenL),
+                   valgus_right: kneeInDeg(robustMax(top.map((r) => r.inR - rep.base.inR)), rep.base.lenR) };
         },
         summaryKeys: ["valgus_left", "valgus_right"],
         checks: [
           { id: "knee_caves", label: (r) => `Knee caves in (left ${fmt(r.valgus_left)}°, right ${fmt(r.valgus_right)}°)`,
             test: (r) => Math.max(r.valgus_left, r.valgus_right) > T.mini_squat.valgus },
         ],
-        live: (m) => (Math.max(m.valgusL, m.valgusR) > T.mini_squat.valgus ? "Push your knees out over your toes" : null),
+        live: (m, b) => (Math.max(kneeInDeg(m.inL - b.inL, b.lenL), kneeInDeg(m.inR - b.inR, b.lenR)) > T.mini_squat.valgus ? "Push your knees out over your toes" : null),
       },
     },
   },
@@ -285,10 +301,11 @@ export const EXERCISES = {
     views: {
       side: {
         setup: "Stand side-on at a low step, operated leg nearest the phone. Step up with the operated leg, straighten it fully, step back down.",
-        metrics: (f, { op }) => {
-          const ok = legOk(f, op);
+        autoLeg: "knee",       // the stepping leg is the one whose knee bends and straightens most
+        metrics: (f, { leg }) => {
+          const ok = legOk(f, leg);
           const w = ["left", "right"].filter((s) => vis(f.wrist[s])).map((s) => f.wrist[s][1] < f.hip[s][1] ? 1 : 0);
-          return { ok, hipUp: -f.hip[op][1], thigh: thighLen(f, op), knee: ok ? kneeFlex(f, op) : NaN, handHigh: w.length ? Math.max(...w) : 0 };
+          return { ok, hipUp: -f.hip[leg][1], thigh: thighLen(f, leg), knee: ok ? kneeFlex(f, leg) : NaN, handHigh: w.length ? Math.max(...w) : 0 };
         },
         signal: { key: "hipUp", scale: "thigh", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "thigh lengths" },
         measure: (rep) => {
@@ -304,18 +321,28 @@ export const EXERCISES = {
         metrics: (f, { op, good }) => {
           const ok = vis(f.hip.left, f.hip.right) && legOk(f, op);
           const hw = hipWidth(f);
-          // + when the hip on the non-stepping side is lower than the stepping side (hip drop).
-          const drop = (Math.atan2(f.hip[good][1] - f.hip[op][1], hw) * 180) / Math.PI;
-          return { ok, hipUp: -hipMid(f)[1], hw, drop, valgus: valgus(f, op) };
+          // dropPx: + when the hip on the non-stepping side is lower than the stepping side.
+          return { ok, hipUp: -hipMid(f)[1], hw, dropPx: f.hip[good][1] - f.hip[op][1], inPx: kneeInPx(f, op), len: legLen(f, op) };
         },
         signal: { key: "hipUp", scale: "hw", dir: 1, start: 0.2, end: 0.1, minExcursion: 0.3, label: "Body rise", unit: "hip widths" },
-        measure: (rep) => ({ hip_drop: robustMax(rep.rows.map((r) => r.drop)), valgus: robustMax(rep.rows.map((r) => r.valgus)) }),
+        // Judged only while the body is up on the stepping leg, not at the start, where the
+        // foot is on the step, the knee points at the camera and the pelvis is naturally tilted.
+        // Hip drop: upper half of the rise. Knee: from 30% of the rise on, scaled by the leg
+        // length at its straightest in this rep.
+        measure: (rep) => {
+          const sig = EXERCISES.step_up.views.front.signal;
+          const up = topRows(rep, sig, 0.3), top = topRows(rep, sig, 0.5);
+          return { hip_drop: deg(Math.atan(robustMax(top.map((r) => r.dropPx)) / rep.base.hw)),
+                   valgus: kneeInDeg(robustMax(up.map((r) => r.inPx)), robustMax(rep.rows.map((r) => r.len))) };
+        },
         summaryKeys: ["hip_drop", "valgus"],
         checks: [
           { id: "hip_drops", label: (r) => `Hip drops on the other side (${fmt(r.hip_drop)}°)`, test: (r) => r.hip_drop > T.step_up.hipDrop },
           { id: "knee_caves", label: (r) => `Knee caves in (${fmt(r.valgus)}°)`, test: (r) => r.valgus > T.step_up.valgus },
         ],
-        live: (m) => (m.drop > T.step_up.hipDrop ? "Keep your hips level" : m.valgus > T.step_up.valgus ? "Knee over your toes" : null),
+        live: (m, b) => ((m.hipUp - b.hipUp) / b.hw < 0.3 ? null       // only once the body has risen
+          : deg(Math.atan(m.dropPx / b.hw)) > T.step_up.hipDrop ? "Keep your hips level"
+          : kneeInDeg(m.inPx, Math.max(m.len, b.len)) > T.step_up.valgus ? "Knee over your toes" : null),
       },
     },
   },
@@ -326,9 +353,10 @@ export const EXERCISES = {
       side: {
         lying: true,
         setup: "Lie on your back with knees bent, side-on to the phone (landscape, on the floor). Squeeze your glutes and lift the hips until shoulders, hips and knees are in a line, hold, lower.",
-        metrics: (f, { op }) => {
-          const ok = vis(shoulderOf(f, op), f.hip[op], f.knee[op]);
-          return { ok, line: ok ? hipLine(f, op) : NaN };
+        autoLeg: "visible",
+        metrics: (f, { leg }) => {
+          const ok = vis(shoulderOf(f, leg), f.hip[leg], f.knee[leg]);
+          return { ok, line: ok ? hipLine(f, leg) : NaN };
         },
         signal: { key: "line", dir: 1, start: 10, end: 5, minExcursion: 12, label: "Shoulder–hip–knee", unit: "°" },
         measure: (rep) => ({ top_line: rep.peak }),
