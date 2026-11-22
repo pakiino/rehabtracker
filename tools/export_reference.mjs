@@ -35,5 +35,6 @@ for (const f of fs.readdirSync(SRC).filter((x) => x.endsWith(".json"))) {
   });
   (all[ex] ??= { view, signal: { key, label: r.signal.label, unit: sc ? (r.signal.unit ?? sc + " lengths") + " (from rep start)" : (r.signal.unit ?? "°") }, clips: [] }).clips.push({ clip, leg: r.leg, rows, reps });
 }
+fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(OUT + "all.json", JSON.stringify({ all, T }));
 for (const [ex, e] of Object.entries(all)) console.log(ex, e.clips.map((c) => `${c.clip.slice(-14)}:${c.reps.length}`).join(" "));
