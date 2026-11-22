@@ -6,6 +6,7 @@ import { toFrame, facingOf, vis, rotationForHead, unrotateLandmarks, drawRotated
 import { analyze, liveCue, viewCheck } from "./engine.js";
 import { PoseSmoother, Debounced } from "./smooth.js";
 import { EXERCISES, ORDER, T } from "./exercises.js";
+import { scoreSession5, patientView5, ptView5 } from "./score.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
 const MODEL_URLS = {
@@ -553,6 +554,7 @@ function finalize() {
   const r = analyze(rec.frames, e, ctx, opts());
   state.result = r;
   r.setupWarning = viewWarning(rec.frames, ctx.view, false);
+  r.score5 = scoreSession5(r, rec.frames, e.id, { ...ctx, op: r.leg ?? ctx.op });
   const rotUsed = Object.entries(rec.rotations).sort((a, b) => b[1] - a[1])[0]?.[0];
   const clean = (x) => (typeof x === "number" ? Math.round(x * 1000) / 1000 : x);
   const repOut = r.reps.map((rep) => {
@@ -560,6 +562,8 @@ function finalize() {
     for (const k of ["t_start", "t_end", "duration_s", "rise_s", "return_s", "peak", "excursion", ...(v.summaryKeys ?? [])]) o[k] = clean(rep[k]);
     for (const k of Object.keys(rep)) if (!(k in o) && !["rows", "base", "errors", "peakIndex"].includes(k)) o[k] = clean(rep[k]);
     o.errors = rep.errors.map((x) => x.id);
+    const sr = r.score5.reps.find((x) => x.n === rep.n);
+    if (sr) { o.score_1to5 = sr.score; o.score_reasons = sr.reasons; }
     return o;
   });
   state.session = {
@@ -572,6 +576,8 @@ function finalize() {
     reps_count: r.reps.length, last_rep_unfinished: r.unfinished, reps_rejected_as_not_exercise: r.rejected,
     reps: repOut,
     error_counts: r.summary.errors,
+    score_1to5: { session: r.score5.score, stars: r.score5.stars, label: r.score5.label, pt: ptView5(r.score5, r),
+      note: r.score5.note },
     checks: v.checks.map((c) => c.id),
     medians: Object.fromEntries(Object.entries(r.summary.median).map(([k, x]) => [k, clean(x)])),
     thresholds: T[{ straight_leg_raise: "slr", sitting_knee_bend: "sitting_bend", standing_knee_bend: "standing_bend",
@@ -599,6 +605,13 @@ function renderResults(r, e, v, rec) {
   $("resTitle").textContent = `${e.label} · ${ui.view.value} view · ${ui.op.value} leg`;
   $("setupWarn").hidden = !r.setupWarning; $("setupWarn").textContent = r.setupWarning ?? "";
   $("results").classList.toggle("unreliable", viewCheck(rec.frames, ui.view.value).mismatch === "side_as_front");
+  const pv = patientView5(r.score5);
+  $("scoreBox").hidden = false;
+  $("scoreBox").innerHTML = pv.stars
+    ? `<div class="stars" role="img" aria-label="${pv.stars} out of 5 stars">${"★".repeat(pv.stars)}<span class="off">${"★".repeat(5 - pv.stars)}</span></div>` +
+      `<div class="scoretxt"><span class="big">${esc(pv.headline)}</span> <span class="num">${r.score5.score.toFixed(1)} / 5</span>` +
+      `<span class="sub2">${esc(pv.message)} ${pv.tip ? "Tip: " + esc(pv.tip) + "." : ""}</span></div>`
+    : `<div class="scoretxt"><span class="big">${esc(pv.headline)}</span><span class="sub2">${esc(pv.message)}</span></div>`;
   const sig = v.signal, n = r.reps.length;
   const withErr = r.reps.filter((x) => x.errors.length).length;
   $("evalBox").innerHTML = n
@@ -640,9 +653,10 @@ const keyLabel = (k, sig) => (k === "peak" ? `${sig.label} at top` : k === "excu
 function drawRepTable(r, v) {
   const keys = mainKeys(r, v);
   const unit = v.signal.unit;
-  const head = `<tr><th>#</th><th>Start</th>${keys.map((k) => `<th>${esc(keyLabel(k, v.signal))}</th>`).join("")}<th>Errors</th></tr>`;
+  const head = `<tr><th>#</th><th>Start</th>${keys.map((k) => `<th>${esc(keyLabel(k, v.signal))}</th>`).join("")}<th>Score</th><th>Errors</th></tr>`;
+  const sc = (rep) => r.score5?.reps.find((x) => x.n === rep.n)?.score ?? "–";
   const body = r.reps.map((rep) => `<tr><td>${rep.n}</td><td>${rep.t_start.toFixed(1)} s</td>` +
-    keys.map((k) => `<td>${fmtKey(k, rep[k], unit)}</td>`).join("") +
+    keys.map((k) => `<td>${fmtKey(k, rep[k], unit)}</td>`).join("") + `<td>${sc(rep)} / 5</td>` +
     `<td class="${rep.errors.length ? "bad" : ""}">${rep.errors.length ? rep.errors.map((x) => esc(x.label)).join("<br>") : "none"}</td></tr>`).join("");
   $("repTable").innerHTML = r.reps.length ? `<table>${head}${body}</table>` : `<p class="note">No reps.</p>`;
 }

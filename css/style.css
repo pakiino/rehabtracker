@@ -152,3 +152,12 @@ td.bad { color: #ffd27a; }
 .setupwarn::before { content: "! "; font-weight: 800; }
 #results.unreliable .evalbox, #results.unreliable .errs, #results.unreliable .stats, #results.unreliable .tablewrap,
 #results.unreliable .viz-root { opacity: .4; }
+
+/* 1-5 score card: large and plain for older adults */
+.scorebox{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:14px 16px;margin:8px 0 12px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line)}
+.scorebox .stars{font-size:40px;line-height:1;color:#e8a317;letter-spacing:2px;white-space:nowrap}
+.scorebox .stars .off{color:#c8cdd2}
+.scorebox .scoretxt{display:flex;flex-direction:column;gap:2px;min-width:0}
+.scorebox .big{font-size:26px;font-weight:700}
+.scorebox .num{font-size:16px;opacity:.75}
+.scorebox .sub2{font-size:16px}

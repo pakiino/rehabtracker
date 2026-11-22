@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "description": "Phone-browser joint tracking for 10 knee rehab exercises: rep counting and common-error checks with MediaPipe Pose.",
-  "scripts": { "test": "node --test tests/exercises.test.mjs tests/steady.test.mjs" }
+  "scripts": { "test": "node --test tests/exercises.test.mjs tests/steady.test.mjs tests/score.test.mjs" }
 }

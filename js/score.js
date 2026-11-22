@@ -166,3 +166,76 @@ export function ptView(s, result, previous = null) {
     reps, trend, flags, weights: s.weights, note: s.note,
   };
 }
+
+// ---------- 1-5 score, based on the PT-approved reference ranges ----------
+// Each rep starts at 5 and loses points for what the PT would correct:
+//   a form error the app flags (calibrated to the PT's labels) ........ -2 each
+//   moved clearly less than the reference (below p10, by 10% of p50) . -1
+//   moved much less (under 60% of the reference median) .............. -2 instead
+//   much quicker than any approved rep (under 60% of p10 duration) .... -1 (only if no speed error)
+// Floor 1. A session is the mean of its reps (one decimal); the patient sees whole stars.
+import { REFERENCE } from "./reference.js";
+
+export const LABELS5 = {
+  5: { label: "Excellent", note: "Just like the reference. Keep it up." },
+  4: { label: "Good", note: "Nearly there." },
+  3: { label: "Fair", note: "One thing to work on." },
+  2: { label: "Needs work", note: "Slow down and work on this." },
+  1: { label: "Ask your PT", note: "Show this result to your physical therapist." },
+};
+
+export function scoreRep5(rep, exId) {
+  const ref = REFERENCE[exId], cfg = SCORE[exId] ?? { control: [] };
+  let score = 5; const reasons = [];
+  const errs = rep.errors.map((e) => e.id);
+  for (const id of errs) { score -= 2; reasons.push(id); }
+  if (ref) {
+    const m = ref.movement, amount = rep.excursion;
+    if (Number.isFinite(amount) && m.p50 > 0) {
+      if (amount < 0.6 * m.p50) { score -= 2; reasons.push("much_less_movement"); }
+      else if (amount < m.p10 - 0.1 * m.p50 && !errs.includes("partial")) { score -= 1; reasons.push("less_movement"); }
+    }
+    const fast = errs.some((id) => cfg.control.includes(id));
+    if (!fast && Number.isFinite(rep.duration_s) && rep.duration_s < 0.6 * ref.duration.p10) { score -= 1; reasons.push("much_quicker"); }
+  }
+  return { n: rep.n, score: Math.max(1, score), reasons,
+    movement_vs_ref: ref && Number.isFinite(rep.excursion) ? Math.round((100 * rep.excursion) / ref.movement.p50) : null };
+}
+
+export function scoreSession5(result, frames, exId, ctx) {
+  const quality = trackingQuality(frames, result, ctx.op);
+  const ref = REFERENCE[exId] ?? null;
+  const base = { exercise: exId, quality, reference: ref, note: "Prototype 1-5 score from one PT-approved session; not a clinical score." };
+  if (!quality.reliable) return { ...base, score: null, stars: null, reps: [], label: "Can't score" };
+  const reps = result.reps.map((r) => scoreRep5(r, exId));
+  if (!reps.length) return { ...base, score: null, stars: null, reps, label: "No reps" };
+  const score = Math.round((10 * reps.reduce((a, r) => a + r.score, 0)) / reps.length) / 10;
+  // Stars round down unless within 0.25 of the next star, so a session with a few PT-type
+  // errors (e.g. 4.6) shows 4 stars and the tip, instead of a full 5.
+  const stars = Math.min(5, Math.max(1, Math.floor(score + 0.25)));
+  const counts = {};
+  for (const r of reps) for (const id of r.reasons) counts[id] = (counts[id] || 0) + 1;
+  const mainFix = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  return { ...base, score, stars, label: LABELS5[stars].label, main_fix: mainFix, reps };
+}
+
+const MORE_TIPS = { much_less_movement: "Try to move a bit further, if it's comfortable", less_movement: "Move a little further, if it's comfortable", much_quicker: "Slow down a little" };
+
+export function patientView5(s, prescribedReps) {
+  if (s.score == null) return { headline: s.label, message: s.label === "No reps" ? "No full reps were found." : "Tracking was unreliable. Check the camera and try again." };
+  return { stars: s.stars, headline: LABELS5[s.stars].label, message: LABELS5[s.stars].note,
+    reps: prescribedReps ? `${s.reps.length} of ${prescribedReps} reps` : `${s.reps.length} reps`,
+    tip: s.main_fix ? FIX_TEXT[s.main_fix] ?? MORE_TIPS[s.main_fix] ?? s.main_fix : "Nice form. Keep it up!" };
+}
+
+export function ptView5(s, result) {
+  const flags = [];
+  if (!s.quality.reliable) flags.push("Tracking unreliable: not scored");
+  if (s.reference && s.reference.people < 3) flags.push(`Reference from ${s.reference.people} person(s), ${s.reference.reps} reps: provisional`);
+  const low = s.reps.filter((r) => r.score <= 2).map((r) => r.n);
+  if (low.length) flags.push(`Reps scored 1-2: ${low.join(", ")}`);
+  return { score: s.score, stars: s.stars, label: s.label, quality: s.quality, reference: s.reference,
+    reps: result.reps.map((r, i) => ({ n: r.n, score: s.reps[i]?.score ?? null, reasons: s.reps[i]?.reasons ?? [],
+      movement_vs_ref_pct: s.reps[i]?.movement_vs_ref ?? null, duration_s: r.duration_s, errors: r.errors.map((e) => e.label) })),
+    flags, note: s.note };
+}
